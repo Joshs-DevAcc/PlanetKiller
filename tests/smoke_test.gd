@@ -1,8 +1,9 @@
 extends SceneTree
 ## Headless smoke test. Run from the project folder:
 ##   godot --headless --path . -s res://tests/smoke_test.gd
-## Loads the game, checks the player lands on the ground, mines a column of
-## blocks, sells them and checks the money went up. Exits with code 1 on failure.
+## Loads the game, checks the player lands on the ground, digs into the terrain,
+## sells what was dug, buys upgrades and checks the numbers.
+## Exits with code 1 on failure.
 
 var _failures := 0
 
@@ -18,55 +19,106 @@ func _run() -> void:
 
 	var world = main.world
 	var player = main.player
+	var shop = main.shop
 	var game: Node = root.get_node("Game")
 	_check(world.size == WorldConfig.WORLD_SIZE, "world has the configured size")
 	_check(player.is_on_floor(), "player is standing on the ground (at %s)" % player.global_position)
+	print("  info meshing took %d ms" % world.last_build_ms)
 
-	# Every block layer the generator promises should exist somewhere.
+	# Every material the generator promises should exist somewhere as solid ground.
 	var counts := {}
-	for i in world.data.size():
-		counts[world.data[i]] = counts.get(world.data[i], 0) + 1
+	for i in world.density.size():
+		if world.density[i] >= VoxelWorld.ISO:
+			counts[world.material[i]] = counts.get(world.material[i], 0) + 1
 	for id in Blocks.DEFS.size():
 		if id != Blocks.AIR:
 			_check(counts.get(id, 0) > 0, "%s appears in the world (%d)" % [Blocks.block_name(id), counts.get(id, 0)])
 
-	# Raycast straight down onto the base pad.
-	var hit: Dictionary = world.raycast(world.base_position + Vector3(0.5, 2.0, 0.5), Vector3.DOWN, 5.0)
-	_check(hit["hit"] and hit["id"] == Blocks.BASE_FLOOR, "raycast down finds the base floor")
+	# The terrain has collision: a physics ray straight down hits the base floor.
+	var from: Vector3 = world.base_position + Vector3(0.3, 3.0, 0.3)
+	var ray := PhysicsRayQueryParameters3D.create(from, from + Vector3.DOWN * 6.0)
+	var hit: Dictionary = player.get_world_3d().direct_space_state.intersect_ray(ray)
+	_check(not hit.is_empty() and absf(hit["position"].y - world.base_position.y) < 0.2, "a ray down lands on the base floor")
+	if not hit.is_empty():
+		_check(world.material_at(hit["position"] + Vector3.DOWN * 0.3) == Blocks.BASE_FLOOR, "the floor under the base is Base Floor")
 
-	# Mine a column next to the base by aiming the player's target at it.
-	var x := int(world.base_position.x) + 6
+	# Dig straight down a few times somewhere away from the base.
+	var x := int(world.base_position.x) + 14
 	var z := int(world.base_position.z)
-	var top: int = world.surface_height(x, z)
-	for y in range(top, top - 8, -1):
-		var p := Vector3i(x, y, z)
-		var id: int = world.get_block(p)
-		player.target = {"hit": true, "pos": p, "id": id, "normal": Vector3i.UP}
-		player.mine_progress = 0.0
-		for i in 200:
-			player.mine_tick(0.05)
-			if world.get_block(p) == Blocks.AIR:
+	player.camera.rotation.x = -PI / 2 + 0.01
+	player.rotation.y = 0
+	var digs := 0
+	for step in 4:
+		var top := _surface_at(world, x, z)
+		var p := Vector3(x + 0.5, top, z + 0.5)
+		var id: int = world.material_at(p + Vector3.DOWN * 0.3)
+		player.target = {"hit": true, "pos": p, "normal": Vector3.UP, "id": id}
+		var before := top
+		for i in 40:
+			player.hit()
+			if _surface_at(world, x, z) < before - 0.5:
 				break
-		_check(world.get_block(p) == Blocks.AIR, "mined %s at %s" % [Blocks.block_name(id), p])
+		var after := _surface_at(world, x, z)
+		_check(after < before - 0.5, "dig %d through %s lowered the ground from %.1f to %.1f" % [step + 1, Blocks.block_name(id), before, after])
+		digs += 1
 	_check(game.backpack_count() > 0, "backpack has %d blocks" % game.backpack_count())
+	var t0 := Time.get_ticks_usec()
+	world.dig(Vector3(x + 0.5, _surface_at(world, x, z), z + 0.5), 3.5)
+	print("  info a max-size dig took %.1f ms" % ((Time.get_ticks_usec() - t0) / 1000.0))
 
 	var value: int = game.backpack_value()
-	player.respawn()
-	player.global_position = world.base_position + Vector3(0, 1.0, 0)
+	player.global_position = main.get_node("SellPad").global_position + Vector3(0, 1.0, 0)
 	await _frames(30)
 	_check(game.money == value and value > 0, "selling at the pad paid $%d (expected $%d)" % [game.money, value])
 	_check(game.backpack_count() == 0, "backpack is empty after selling")
 
-	# The backpack refuses blocks when full.
-	game.backpack_capacity = 0
-	var p2 := Vector3i(x, top - 8, z)
-	player.target = {"hit": true, "pos": p2, "id": world.get_block(p2), "normal": Vector3i.UP}
-	for i in 100:
-		player.mine_tick(0.05)
-	_check(world.get_block(p2) != Blocks.AIR, "a full backpack stops mining")
+	# Shop: can't buy when broke, can when rich, and upgrades change the stats.
+	game.money = 0
+	_check(not game.buy("tool"), "can't buy a tool with no money")
+	game.money = 100000
+	var old_radius: float = game.dig_radius()
+	_check(game.buy("tool") and game.tool()["name"] == Upgrades.TOOLS[1]["name"], "bought %s" % Upgrades.TOOLS[1]["name"])
+	_check(game.buy("dig") and game.dig_radius() > old_radius, "bought a bigger dig size (%.1f)" % game.dig_radius())
+	_check(game.buy("backpack") and game.backpack_capacity() == Upgrades.BACKPACK[1]["capacity"], "bought a bigger backpack")
+	for i in 10:
+		game.buy("tool")
+	_check(game.tool_level == Upgrades.TOOLS.size() - 1 and game.next_upgrade("tool").is_empty(), "tool upgrades stop at the last level")
+	await _frames(5)
+	player.global_position = shop.global_position + Vector3(0, 1.0, 1.5)
+	await _frames(5)
+	_check(shop.is_player_near(), "player standing at the counter can use the shop")
+	shop.open()
+	_check(game.ui_open, "opening the shop takes over the mouse")
+	shop.close()
+
+	# The base floor can't be dug.
+	var base_top: float = world.base_position.y
+	player.target = {"hit": true, "pos": world.base_position + Vector3(1.5, 0, 1.5), "normal": Vector3.UP, "id": Blocks.BASE_FLOOR}
+	for i in 30:
+		player.hit()
+	_check(absf(_surface_at(world, int(world.base_position.x) + 1, int(world.base_position.z) + 1) - base_top) < 0.3, "the base floor can't be dug")
+
+	# A full backpack stops digging.
+	game.backpack = {Blocks.STONE: float(game.backpack_capacity())}
+	var fx := x + 8
+	var ftop := _surface_at(world, fx, z)
+	player.target = {"hit": true, "pos": Vector3(fx + 0.5, ftop, z + 0.5), "normal": Vector3.UP, "id": Blocks.GRASS + 1}
+	for i in 40:
+		player.hit()
+	_check(absf(_surface_at(world, fx, z) - ftop) < 0.01, "a full backpack stops digging")
 
 	print("\n%s (%d failures)" % ["PASS" if _failures == 0 else "FAIL", _failures])
 	quit(1 if _failures > 0 else 0)
+
+
+## Height of the topmost surface in a column, from the density data.
+func _surface_at(world, x: int, z: int) -> float:
+	for y in range(world.size.y - 2, -1, -1):
+		var d_hi: int = world.get_density(Vector3i(x, y + 1, z))
+		var d_lo: int = world.get_density(Vector3i(x, y, z))
+		if d_lo >= VoxelWorld.ISO and d_hi < VoxelWorld.ISO:
+			return y + (d_lo - (VoxelWorld.ISO - 0.5)) / float(d_lo - d_hi)
+	return 0.0
 
 
 func _frames(n: int) -> void:

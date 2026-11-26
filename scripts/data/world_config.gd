@@ -38,6 +38,6 @@ const ORE_FREQUENCY := 0.13
 ## Trees
 const TREE_ATTEMPTS := 90
 
-## The flat, unbreakable base pad in the middle of the map.
-const BASE_RADIUS := 3
-const FLAT_RADIUS := 7.0
+## The flat, unbreakable base floor in the middle of the map (a disc this many blocks across from the middle).
+const BASE_RADIUS := 6
+const FLAT_RADIUS := 10.0

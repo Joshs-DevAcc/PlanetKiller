@@ -4,7 +4,11 @@ An incremental voxel mining game. You start on the surface with a pickaxe and a
 backpack. Every block can be mined, deeper layers pay more, and the long-term goal
 is to strip the whole planet down to its core.
 
-![Prototype screenshot](docs/screenshot.png)
+![The base, with the shop and sell pad](docs/screenshot.png)
+
+| Digging into the layers | The shop |
+| --- | --- |
+| ![A pit dug through grass, dirt and stone](docs/screenshot_pit.png) | ![The shop menu](docs/screenshot_shop.png) |
 
 ## Play it
 
@@ -24,17 +28,25 @@ If your computer's graphics are old and the game won't start, go to
 | Mouse | Look |
 | Space | Jump |
 | Shift | Sprint |
-| Hold left click | Mine the outlined block |
+| Hold left click | Swing your tool. Each dig scoops a round chunk out of the ground |
+| E | Open the shop (stand at the counter) |
 | R | Teleport back to base |
 | Esc | Free the mouse (click to grab it again) |
 
 ### The loop
 
-Mine blocks to fill your backpack (40 blocks to start). When it's full, go back to the
-glowing green **SELL** pad at the base (press R to teleport there) and step on it to
-sell everything. Your money shows at the top left.
+Dig to fill your backpack (40 blocks to start). The glowing bubble shows how big a chunk
+your next dig takes out. Harder materials need more hits before the chunk comes out.
+When your backpack is full, go back to the green **SELL** pad at the base (press R to
+teleport there) and step on it to sell everything. Then spend your money at the **SHOP**:
 
-| Layer | Found | Value |
+| Upgrade | Levels |
+| --- | --- |
+| Mining tool | Rusty, Iron and Steel Pickaxe, then Hand Drill and Power Drill |
+| Dig size | Radius 1.3, 1.7, 2.2, 2.8, 3.5 blocks |
+| Backpack | 40, 80, 160, 320, 640 blocks |
+
+| Layer | Found | Value per block |
 | --- | --- | --- |
 | Grass, leaves | Surface | $0 (not kept) |
 | Dirt | Top 4 blocks | $1 |
@@ -52,16 +64,20 @@ sell everything. Your money shows at the top left.
 
 Most numbers live in two files, so you can change them without touching game code:
 
-- `scripts/data/blocks.gd`: every block's name, sell value, how long it takes to mine and its color.
+- `scripts/data/blocks.gd`: every material's name, sell value, hardness and color.
+- `scripts/data/upgrades.gd`: shop prices and what each tool, dig size and backpack level gives you.
 - `scripts/data/world_config.gd`: world size, seed, hill height, layer depths, which ores appear at which depths and how rare they are.
-- `scripts/game_state.gd`: starting backpack size, pickaxe power and reach.
+- `scripts/game_state.gd`: money, backpack and upgrade levels, plus how far you can reach.
 
 ## How it's built
 
-- `scripts/voxel_world.gd` holds the planet as one byte per block and draws it in 16×16×16 chunks.
-  Mining a block rebuilds only that chunk's mesh and collision.
-- `scripts/player.gd` is the first-person miner. Mining uses a grid raycast, so the outlined block is exactly what you hit.
-- `scripts/sell_pad.gd` is the sell zone, `scripts/hud.gd` the on-screen text, `scripts/main.gd` builds the scene.
+- `scripts/voxel_world.gd` stores a density and a material for every grid point and draws the
+  surface with *surface nets*, which gives smooth, rounded terrain instead of cubes. It is split
+  into 16×16×16 chunks, and a dig rebuilds only the chunks it touched.
+- `scripts/player.gd` is the first-person miner: movement, the tool models, swing and drill
+  animations, camera bob and shake, and digging.
+- `scripts/shop.gd` is the shop counter and menu, `scripts/sell_pad.gd` the sell zone,
+  `scripts/hud.gd` the on-screen text, `scripts/main.gd` builds the scene.
 
 Everything is plain GDScript with no plugins, so the project opens in a stock Godot install.
 The world is 96×80×96 blocks for now. Going much bigger (a real planet with caves) will
@@ -81,8 +97,8 @@ godot --headless --path . -s res://tests/smoke_test.gd
 
 ## Roadmap
 
-1. **Core loop** (this): walk, mine, fill the backpack, sell at base.
-2. **Economy:** shop for pickaxe and backpack upgrades, tuned layer values.
+1. **Core loop:** walk, dig smooth terrain, fill the backpack, sell at base. Done.
+2. **Economy:** shop for tool, dig size and backpack upgrades. Started; values still need tuning.
 3. **Underground:** caves, monsters, weapons.
 4. **Base building:** place blocks, base upgrades.
 5. **Vehicles:** drill tank, then a ship for carving big chunks.

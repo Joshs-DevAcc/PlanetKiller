@@ -1,7 +1,7 @@
 class_name Player
 extends CharacterBody3D
-## First-person miner: walks, jumps, and mines the block under the crosshair
-## by holding the left mouse button.
+## First-person miner. Hold left click to swing the tool at the terrain.
+## Each hit adds progress; when it fills, a round chunk is dug out of the world.
 
 const WALK_SPEED := 5.0
 const SPRINT_SPEED := 8.5
@@ -10,18 +10,28 @@ const GRAVITY := 20.0
 const MOUSE_SENSITIVITY := 0.0025
 const EYE_HEIGHT := 0.65 # above the body's center
 
+## When in a swing the tool connects (0-1 through one swing).
+const IMPACT_PHASE := 0.62
+
 var world: VoxelWorld
 var spawn_position := Vector3.ZERO
 
 ## What the crosshair is on. Read by the HUD.
+## {"hit": bool, "pos": Vector3, "normal": Vector3, "id": int}
 var target := {"hit": false}
 var mine_progress := 0.0
 
 var camera: Camera3D
 var _pitch := 0.0
-var _highlight: MeshInstance3D
-var _pickaxe: Node3D
-var _swing_time := 0.0
+var _dig_preview: MeshInstance3D
+var _tool: Node3D
+var _drill_bit: Node3D
+var _swing_phase := 0.0
+var _swinging := false
+var _bob_time := 0.0
+var _shake := 0.0
+var _progress_anchor := Vector3.INF
+var _progress_id := -1
 var _toast_cooldown := 0.0
 
 
@@ -42,20 +52,23 @@ func _ready() -> void:
 
 	# Headlamp so tunnels are not pitch black.
 	var lamp := SpotLight3D.new()
-	lamp.spot_range = 16.0
+	lamp.spot_range = 18.0
 	lamp.spot_angle = 40.0
-	lamp.spot_attenuation = 0.5
-	lamp.light_energy = 0.7
-	lamp.light_cull_mask = 1 # don't light the pickaxe (layer 2)
+	lamp.spot_attenuation = 0.6
+	lamp.light_energy = 0.45
+	lamp.light_cull_mask = 1 # don't light the tool (layer 2)
+	lamp.shadow_enabled = true
 	camera.add_child(lamp)
 
-	_pickaxe = _make_pickaxe()
-	camera.add_child(_pickaxe)
-	_highlight = _make_highlight()
-	_highlight.top_level = true
-	add_child(_highlight)
+	_dig_preview = _make_dig_preview()
+	_dig_preview.top_level = true
+	add_child(_dig_preview)
 
-	floor_snap_length = 0.3
+	_build_tool()
+	Game.upgraded.connect(func(_kind: String) -> void: _build_tool())
+
+	floor_snap_length = 0.4
+	floor_max_angle = deg_to_rad(55)
 	respawn()
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 
@@ -66,6 +79,8 @@ func respawn() -> void:
 
 
 func _unhandled_input(event: InputEvent) -> void:
+	if Game.ui_open:
+		return
 	if event is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
 		rotate_y(-event.relative.x * MOUSE_SENSITIVITY)
 		_pitch = clampf(_pitch - event.relative.y * MOUSE_SENSITIVITY, -1.5, 1.5)
@@ -83,12 +98,15 @@ func _unhandled_input(event: InputEvent) -> void:
 func _physics_process(delta: float) -> void:
 	if not is_on_floor():
 		velocity.y -= GRAVITY * delta
-	if Input.is_action_just_pressed("jump") and is_on_floor():
-		velocity.y = JUMP_VELOCITY
-
-	var input := Input.get_vector("move_left", "move_right", "move_forward", "move_back")
+	var input := Vector2.ZERO
+	var speed := WALK_SPEED
+	if not Game.ui_open:
+		if Input.is_action_just_pressed("jump") and is_on_floor():
+			velocity.y = JUMP_VELOCITY
+		input = Input.get_vector("move_left", "move_right", "move_forward", "move_back")
+		if Input.is_action_pressed("sprint"):
+			speed = SPRINT_SPEED
 	var dir := (transform.basis * Vector3(input.x, 0, input.y)).normalized()
-	var speed := SPRINT_SPEED if Input.is_action_pressed("sprint") else WALK_SPEED
 	if dir != Vector3.ZERO:
 		velocity.x = dir.x * speed
 		velocity.z = dir.z * speed
@@ -104,47 +122,67 @@ func _physics_process(delta: float) -> void:
 func _process(delta: float) -> void:
 	_toast_cooldown = maxf(_toast_cooldown - delta, 0.0)
 	_update_target()
-	var mining := Input.is_action_pressed("mine") and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED
-	if mining and target["hit"]:
-		mine_tick(delta)
-	else:
-		mine_progress = 0.0
-	_animate_pickaxe(delta, mining)
+	var wants_to_mine := Input.is_action_pressed("mine") and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED and not Game.ui_open
+	_animate(delta, wants_to_mine)
 
 
-## Advances mining on the current target. Public so tests can drive it.
-func mine_tick(delta: float) -> void:
+## One strike of the tool against the current target. Public so tests can drive it.
+func hit() -> void:
+	if not target["hit"]:
+		return
 	var id: int = target["id"]
 	var hardness := Blocks.hardness(id)
 	if hardness < 0.0:
-		mine_progress = 0.0
-		_toast_once("%s is too hard to mine with this pickaxe" % Blocks.block_name(id))
+		_toast_once("%s can't be mined" % Blocks.block_name(id))
+		_spawn_debris(target["pos"], Color(0.8, 0.8, 0.8), 4, 1.5)
 		return
 	if Blocks.is_collectable(id) and Game.is_backpack_full():
-		mine_progress = 0.0
-		_toast_once("Backpack full! Sell at the base pad (press R to go back)")
+		_toast_once("Backpack full! Sell at the green pad (press R to go back)")
 		return
-	mine_progress += delta * Game.pickaxe_power / maxf(hardness, 0.05)
-	if mine_progress >= 1.0:
-		_break_block(target["pos"], id)
+	var center := dig_center()
+	if _progress_id != id or center.distance_to(_progress_anchor) > Game.dig_radius() * 0.6:
 		mine_progress = 0.0
+		_progress_id = id
+		_progress_anchor = center
+	var tool := Game.tool()
+	mine_progress += Upgrades.MINING_RATE * tool["power"] / (maxf(hardness, 0.05) * tool["hits_per_second"])
+	_shake = maxf(_shake, 0.05 if tool["kind"] == "pickaxe" else 0.025)
+	_spawn_debris(target["pos"], Blocks.color(id), 5, 2.0)
+	if mine_progress >= 1.0:
+		mine_progress = 0.0
+		_progress_id = -1
+		var removed := world.dig(center, Game.dig_radius())
+		Game.add_materials(removed)
+		_shake = 0.12
+		_spawn_debris(center, Blocks.color(id), 18 + int(Game.dig_radius() * 6), 4.5)
+
+
+## Where the next dig is centered: a little past the surface, so it scoops out a chunk.
+func dig_center() -> Vector3:
+	var into := -camera.global_basis.z
+	return target["pos"] + into * Game.dig_radius() * 0.35
 
 
 func _update_target() -> void:
-	var previous: Variant = target.get("pos")
-	target = world.raycast(camera.global_position, -camera.global_basis.z, Game.reach)
-	if not target["hit"] or target.get("pos") != previous:
+	var from := camera.global_position
+	var dir := -camera.global_basis.z
+	var query := PhysicsRayQueryParameters3D.create(from, from + dir * Game.reach)
+	query.exclude = [get_rid()]
+	var result := get_world_3d().direct_space_state.intersect_ray(query)
+	if result.is_empty():
+		target = {"hit": false}
 		mine_progress = 0.0
-	_highlight.visible = target["hit"]
+		_progress_id = -1
+	else:
+		var pos: Vector3 = result["position"]
+		var normal: Vector3 = result["normal"]
+		var id := world.material_at(pos - normal * 0.3)
+		# Ignore things that aren't terrain, like the shop counter.
+		target = {"hit": true, "pos": pos, "normal": normal, "id": id} if id != Blocks.AIR else {"hit": false}
+	_dig_preview.visible = target["hit"]
 	if target["hit"]:
-		_highlight.global_position = Vector3(target["pos"]) + Vector3(0.5, 0.5, 0.5)
-
-
-func _break_block(pos: Vector3i, id: int) -> void:
-	if Blocks.is_collectable(id):
-		Game.add_to_backpack(id)
-	world.set_block(pos, Blocks.AIR)
-	_spawn_debris(Vector3(pos) + Vector3(0.5, 0.5, 0.5), Blocks.color(id))
+		_dig_preview.global_position = dig_center()
+		_dig_preview.scale = Vector3.ONE * Game.dig_radius()
 
 
 func _toast_once(text: String) -> void:
@@ -153,64 +191,136 @@ func _toast_once(text: String) -> void:
 		_toast_cooldown = 2.0
 
 
-func _spawn_debris(at: Vector3, color: Color) -> void:
+# --- Animation --------------------------------------------------------------------
+
+func _animate(delta: float, wants_to_mine: bool) -> void:
+	var tool := Game.tool()
+	var rate: float = tool["hits_per_second"]
+	var is_drill: bool = tool["kind"] == "drill"
+
+	# Swing cycle. Finish the current swing even after the button is released.
+	if wants_to_mine or _swinging:
+		var before := _swing_phase
+		_swing_phase += delta * rate
+		if wants_to_mine and before < IMPACT_PHASE and _swing_phase >= IMPACT_PHASE:
+			hit()
+		if _swing_phase >= 1.0:
+			_swing_phase -= 1.0
+			_swinging = wants_to_mine
+			if not wants_to_mine:
+				_swing_phase = 0.0
+		else:
+			_swinging = true
+	if not wants_to_mine:
+		mine_progress = maxf(mine_progress - delta * 0.5, 0.0)
+
+	# Walking bob.
+	var flat_speed := Vector2(velocity.x, velocity.z).length()
+	if is_on_floor() and flat_speed > 0.5:
+		_bob_time += delta * flat_speed * 1.7
+	var bob := clampf(flat_speed / SPRINT_SPEED, 0.0, 1.0)
+	camera.position.y = EYE_HEIGHT + sin(_bob_time * 2.0) * 0.04 * bob
+
+	# Shake on hits.
+	_shake = maxf(_shake - delta * 0.6, 0.0)
+	camera.h_offset = randf_range(-1, 1) * _shake * 0.3
+	camera.v_offset = randf_range(-1, 1) * _shake * 0.3
+
+	var rest := Vector3(0.36, -0.34, -0.55)
+	var sway := Vector3(cos(_bob_time) * 0.012, sin(_bob_time * 2.0) * 0.015, 0) * bob
+	if is_drill:
+		var active := wants_to_mine
+		_drill_bit.rotate_object_local(Vector3.UP, delta * (40.0 if active else 6.0))
+		var jitter := Vector3(randf_range(-1, 1), randf_range(-1, 1), 0) * (0.008 if active else 0.0)
+		var push := Vector3(0, 0, -0.08) if active else Vector3.ZERO
+		_tool.position = _tool.position.lerp(rest + sway + push + jitter, minf(delta * 18.0, 1.0))
+		_tool.rotation = Vector3(deg_to_rad(-80), 0, 0)
+	else:
+		var angle := _swing_angle(_swing_phase) if _swinging else 0.0
+		_tool.position = rest + sway + Vector3(0, 0, -0.12 * maxf(-angle, 0.0))
+		_tool.rotation = Vector3(angle, deg_to_rad(-15), deg_to_rad(10))
+
+
+## Pickaxe tilt through a swing: wind up, strike fast, then recover.
+func _swing_angle(p: float) -> float:
+	const RAISED := 0.95
+	const STRUCK := -0.75
+	if p < 0.5:
+		return lerpf(0.0, RAISED, ease(p / 0.5, 0.5))
+	if p < IMPACT_PHASE:
+		return lerpf(RAISED, STRUCK, ease((p - 0.5) / (IMPACT_PHASE - 0.5), 2.2))
+	return lerpf(STRUCK, 0.0, ease((p - IMPACT_PHASE) / (1.0 - IMPACT_PHASE), 0.6))
+
+
+func _spawn_debris(at: Vector3, color: Color, amount: int, speed: float) -> void:
 	var p := CPUParticles3D.new()
 	var cube := BoxMesh.new()
-	cube.size = Vector3(0.14, 0.14, 0.14)
+	cube.size = Vector3(0.12, 0.12, 0.12)
 	var mat := StandardMaterial3D.new()
 	mat.albedo_color = color
 	cube.material = mat
 	p.mesh = cube
-	p.amount = 14
+	p.amount = maxi(amount, 1)
 	p.one_shot = true
 	p.explosiveness = 1.0
-	p.lifetime = 0.7
+	p.lifetime = 0.8
 	p.direction = Vector3.UP
-	p.spread = 80.0
-	p.initial_velocity_min = 2.0
-	p.initial_velocity_max = 4.5
+	p.spread = 70.0
+	p.initial_velocity_min = speed * 0.5
+	p.initial_velocity_max = speed
+	p.angular_velocity_min = -360
+	p.angular_velocity_max = 360
 	p.gravity = Vector3(0, -14, 0)
-	p.emission_shape = CPUParticles3D.EMISSION_SHAPE_BOX
-	p.emission_box_extents = Vector3(0.4, 0.4, 0.4)
+	p.scale_amount_min = 0.6
+	p.scale_amount_max = 1.4
+	p.emission_shape = CPUParticles3D.EMISSION_SHAPE_SPHERE
+	p.emission_sphere_radius = 0.3
 	get_parent().add_child(p)
 	p.global_position = at
 	p.emitting = true
 	get_tree().create_timer(1.2).timeout.connect(p.queue_free)
 
 
-func _animate_pickaxe(delta: float, mining: bool) -> void:
-	if mining:
-		_swing_time += delta
-		_pickaxe.rotation.x = -absf(sin(_swing_time * 11.0)) * 0.9
-	else:
-		_swing_time = 0.0
-		_pickaxe.rotation.x = lerpf(_pickaxe.rotation.x, 0.0, minf(delta * 10.0, 1.0))
+# --- Models -----------------------------------------------------------------------
+
+func _build_tool() -> void:
+	if _tool:
+		_tool.queue_free()
+	var info := Game.tool()
+	_tool = _make_drill(info["color"]) if info["kind"] == "drill" else _make_pickaxe(info["color"])
+	camera.add_child(_tool)
+	for child in _tool.find_children("*", "MeshInstance3D", true, false):
+		var mi := child as MeshInstance3D
+		mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		mi.layers = 2
 
 
-func _make_pickaxe() -> Node3D:
+func _mat(color: Color, metallic := 0.0, roughness := 0.6) -> StandardMaterial3D:
+	var m := StandardMaterial3D.new()
+	m.albedo_color = color
+	m.metallic = metallic
+	m.roughness = roughness
+	return m
+
+
+func _box(parent: Node3D, size: Vector3, pos: Vector3, mat: Material) -> MeshInstance3D:
+	var mi := MeshInstance3D.new()
+	var m := BoxMesh.new()
+	m.size = size
+	m.material = mat
+	mi.mesh = m
+	mi.position = pos
+	parent.add_child(mi)
+	return mi
+
+
+func _make_pickaxe(head_color: Color) -> Node3D:
 	var root := Node3D.new()
-	root.position = Vector3(0.38, -0.32, -0.55)
-	root.rotation = Vector3(0, deg_to_rad(-15), deg_to_rad(10))
-	var handle := MeshInstance3D.new()
-	var hm := BoxMesh.new()
-	hm.size = Vector3(0.05, 0.55, 0.05)
-	var wood := StandardMaterial3D.new()
-	wood.albedo_color = Color(0.5, 0.33, 0.18)
-	hm.material = wood
-	handle.mesh = hm
-	handle.position = Vector3(0, 0.1, 0)
-	root.add_child(handle)
-	var metal := StandardMaterial3D.new()
-	metal.albedo_color = Color(0.45, 0.47, 0.52)
-	metal.roughness = 0.5
-	# Pick head: a long thin bar with pointed tips.
-	var bar := MeshInstance3D.new()
-	var bm := BoxMesh.new()
-	bm.size = Vector3(0.34, 0.05, 0.05)
-	bm.material = metal
-	bar.mesh = bm
-	bar.position = Vector3(0, 0.37, 0)
-	root.add_child(bar)
+	var wood := _mat(Color(0.5, 0.33, 0.18), 0.0, 0.8)
+	var metal := _mat(head_color * 0.8, 0.15, 0.5)
+	_box(root, Vector3(0.05, 0.55, 0.05), Vector3(0, 0.1, 0), wood)
+	_box(root, Vector3(0.34, 0.05, 0.05), Vector3(0, 0.37, 0), metal)
+	_box(root, Vector3(0.09, 0.08, 0.08), Vector3(0, 0.37, 0), metal)
 	for side in [-1.0, 1.0]:
 		var tip := MeshInstance3D.new()
 		var pm := PrismMesh.new()
@@ -220,42 +330,44 @@ func _make_pickaxe() -> Node3D:
 		tip.position = Vector3(side * 0.21, 0.35, 0)
 		tip.rotation.z = -side * deg_to_rad(110)
 		root.add_child(tip)
-	var collar := MeshInstance3D.new()
-	var cm := BoxMesh.new()
-	cm.size = Vector3(0.09, 0.08, 0.08)
-	cm.material = metal
-	collar.mesh = cm
-	collar.position = Vector3(0, 0.37, 0)
-	root.add_child(collar)
-	for child in root.get_children():
-		var mi := child as MeshInstance3D
-		mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-		mi.layers = 2
 	return root
 
 
-func _make_highlight() -> MeshInstance3D:
-	# 12 edges of a cube, slightly bigger than a block.
-	var s := 0.505
-	var c := [
-		Vector3(-s, -s, -s), Vector3(s, -s, -s), Vector3(s, -s, s), Vector3(-s, -s, s),
-		Vector3(-s, s, -s), Vector3(s, s, -s), Vector3(s, s, s), Vector3(-s, s, s),
-	]
-	var edges := [[0, 1], [1, 2], [2, 3], [3, 0], [4, 5], [5, 6], [6, 7], [7, 4], [0, 4], [1, 5], [2, 6], [3, 7]]
-	var verts := PackedVector3Array()
-	for e in edges:
-		verts.append(c[e[0]])
-		verts.append(c[e[1]])
-	var arrays := []
-	arrays.resize(Mesh.ARRAY_MAX)
-	arrays[Mesh.ARRAY_VERTEX] = verts
-	var mesh := ArrayMesh.new()
-	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_LINES, arrays)
+func _make_drill(body_color: Color) -> Node3D:
+	var root := Node3D.new()
+	var body := _mat(body_color, 0.2, 0.5)
+	var dark := _mat(Color(0.15, 0.15, 0.17), 0.3, 0.6)
+	_box(root, Vector3(0.12, 0.26, 0.14), Vector3(0, 0.0, 0), body)
+	_box(root, Vector3(0.06, 0.08, 0.16), Vector3(0, -0.12, 0.04), dark) # grip
+	_drill_bit = Node3D.new()
+	_drill_bit.position = Vector3(0, 0.2, 0)
+	root.add_child(_drill_bit)
+	var bit := MeshInstance3D.new()
+	var cone := CylinderMesh.new()
+	cone.top_radius = 0.0
+	cone.bottom_radius = 0.06
+	cone.height = 0.24
+	cone.radial_segments = 6
+	cone.material = _mat(Color(0.6, 0.62, 0.66), 0.2, 0.4)
+	bit.mesh = cone
+	bit.position = Vector3(0, 0.08, 0)
+	_drill_bit.add_child(bit)
+	return root
+
+
+func _make_dig_preview() -> MeshInstance3D:
+	var mi := MeshInstance3D.new()
+	var sphere := SphereMesh.new()
+	sphere.radius = 1.0
+	sphere.height = 2.0
+	sphere.radial_segments = 24
+	sphere.rings = 12
 	var mat := StandardMaterial3D.new()
 	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	mat.albedo_color = Color(0.05, 0.05, 0.05)
-	mesh.surface_set_material(0, mat)
-	var mi := MeshInstance3D.new()
-	mi.mesh = mesh
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mat.albedo_color = Color(1.0, 0.95, 0.6, 0.12)
+	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	sphere.material = mat
+	mi.mesh = sphere
 	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	return mi

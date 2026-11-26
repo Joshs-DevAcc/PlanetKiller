@@ -1,132 +1,182 @@
 class_name VoxelWorld
 extends Node3D
-## The destructible planet: a grid of blocks stored in one byte array,
-## drawn and collided in 16x16x16 chunks. Editing a block rebuilds only
-## the chunk it sits in (plus a neighbor when it is on a chunk edge).
+## The destructible planet, as smooth voxel terrain.
+##
+## Every grid point stores a density (0-255, solid at 128 and above) and a
+## material (a block id from Blocks). The surface is drawn with "surface nets":
+## one vertex per grid cell the surface passes through, joined into quads.
+## That gives smooth, rounded ground instead of cubes. Digging lowers density
+## inside a sphere, then rebuilds the 16x16x16 chunks it touched.
 
 const CHUNK := 16
+const ISO := 128
+## How quickly density ramps from air to solid across a surface. Higher = sharper.
+const DENSITY_SLOPE := 100.0
 
-const DIRS: Array[Vector3i] = [
-	Vector3i(1, 0, 0), Vector3i(-1, 0, 0),
-	Vector3i(0, 1, 0), Vector3i(0, -1, 0),
-	Vector3i(0, 0, 1), Vector3i(0, 0, -1),
+const CORNERS: Array[Vector3i] = [
+	Vector3i(0, 0, 0), Vector3i(1, 0, 0), Vector3i(0, 1, 0), Vector3i(1, 1, 0),
+	Vector3i(0, 0, 1), Vector3i(1, 0, 1), Vector3i(0, 1, 1), Vector3i(1, 1, 1),
 ]
-const FACE_CORNERS := [
-	[Vector3(1, 0, 0), Vector3(1, 1, 0), Vector3(1, 1, 1), Vector3(1, 0, 1)],
-	[Vector3(0, 0, 0), Vector3(0, 0, 1), Vector3(0, 1, 1), Vector3(0, 1, 0)],
-	[Vector3(0, 1, 0), Vector3(0, 1, 1), Vector3(1, 1, 1), Vector3(1, 1, 0)],
-	[Vector3(0, 0, 0), Vector3(1, 0, 0), Vector3(1, 0, 1), Vector3(0, 0, 1)],
-	[Vector3(0, 0, 1), Vector3(1, 0, 1), Vector3(1, 1, 1), Vector3(0, 1, 1)],
-	[Vector3(0, 0, 0), Vector3(0, 1, 0), Vector3(1, 1, 0), Vector3(1, 0, 0)],
+## The 12 cube edges as pairs of corner indices.
+const EDGES := [
+	[0, 1], [2, 3], [4, 5], [6, 7],
+	[0, 2], [1, 3], [4, 6], [5, 7],
+	[0, 4], [1, 5], [2, 6], [3, 7],
 ]
-## Fake lighting per face so blocks read well even in shadow.
-const FACE_SHADE := [0.82, 0.82, 1.0, 0.6, 0.9, 0.9]
 
 var size: Vector3i
-var data := PackedByteArray()
-## Position of the middle of the top of the base pad, in world units.
+var density := PackedByteArray()
+var material := PackedByteArray()
+## Middle of the top of the base floor, in world units.
 var base_position := Vector3.ZERO
+## How long the last full build took, for the curious.
+var last_build_ms := 0
 
 var _chunk_counts: Vector3i
 var _chunks := {} # Vector3i -> {"mesh": MeshInstance3D, "shape": CollisionShape3D}
-var _faces := [] # FACE_CORNERS triangulated with the winding Godot expects
 var _material: StandardMaterial3D
-var _heights := PackedInt32Array()
+var _heights := PackedFloat32Array()
+var _block_colors: Array[Color] = []
+var _hardness: Array[float] = []
+## Per axis: cell offsets around an edge, and whether that order needs flipping.
+var _edge_cells := []
+var _edge_flip := []
 
 
 func _init() -> void:
-	_build_face_table()
+	_build_edge_tables()
+	for d in Blocks.DEFS:
+		_block_colors.append(d["color"])
+		_hardness.append(d["hardness"])
 	_material = StandardMaterial3D.new()
 	_material.vertex_color_use_as_albedo = true
 	_material.vertex_color_is_srgb = true
-	_material.roughness = 1.0
-	_material.metallic_specular = 0.0
+	_material.roughness = 0.92
+	_material.metallic_specular = 0.2
+	# A soft noise texture projected from all sides adds rocky detail.
+	var noise := FastNoiseLite.new()
+	noise.frequency = 0.08
+	noise.fractal_octaves = 4
+	var tex := NoiseTexture2D.new()
+	tex.noise = noise
+	tex.seamless = true
+	tex.width = 256
+	tex.height = 256
+	tex.color_ramp = Gradient.new()
+	tex.color_ramp.set_color(0, Color(0.72, 0.72, 0.72))
+	tex.color_ramp.set_color(1, Color(1.0, 1.0, 1.0))
+	_material.albedo_texture = tex
+	_material.uv1_triplanar = true
+	_material.uv1_scale = Vector3(0.35, 0.35, 0.35)
 
 
-# --- Public API ---------------------------------------------------------------
+# --- Public API -------------------------------------------------------------------
 
 func generate(seed_value: int) -> void:
 	size = WorldConfig.WORLD_SIZE
-	data = PackedByteArray()
-	data.resize(size.x * size.y * size.z)
-	data.fill(Blocks.AIR)
+	var n := size.x * size.y * size.z
+	density = PackedByteArray()
+	density.resize(n)
+	density.fill(0)
+	material = PackedByteArray()
+	material.resize(n)
+	material.fill(Blocks.AIR)
 	_generate_terrain(seed_value)
 	_generate_trees(seed_value)
 	_generate_base()
+	_seal_edges()
+	var started := Time.get_ticks_msec()
 	_build_all_chunks()
+	last_build_ms = Time.get_ticks_msec() - started
 
 
 func in_bounds(p: Vector3i) -> bool:
 	return p.x >= 0 and p.y >= 0 and p.z >= 0 and p.x < size.x and p.y < size.y and p.z < size.z
 
 
-func get_block(p: Vector3i) -> int:
+func get_density(p: Vector3i) -> int:
+	if not in_bounds(p):
+		return 0
+	return density[_index(p.x, p.y, p.z)]
+
+
+func get_material(p: Vector3i) -> int:
 	if not in_bounds(p):
 		return Blocks.AIR
-	return data[_index(p.x, p.y, p.z)]
+	return material[_index(p.x, p.y, p.z)]
 
 
-func set_block(p: Vector3i, id: int) -> void:
-	if not in_bounds(p):
-		return
-	data[_index(p.x, p.y, p.z)] = id
-	var c := Vector3i(p.x / CHUNK, p.y / CHUNK, p.z / CHUNK)
-	_rebuild_chunk(c)
-	# Blocks on a chunk edge also change the neighboring chunk's visible faces.
-	var local := p - c * CHUNK
-	if local.x == 0: _rebuild_chunk(c + Vector3i(-1, 0, 0))
-	if local.x == CHUNK - 1: _rebuild_chunk(c + Vector3i(1, 0, 0))
-	if local.y == 0: _rebuild_chunk(c + Vector3i(0, -1, 0))
-	if local.y == CHUNK - 1: _rebuild_chunk(c + Vector3i(0, 1, 0))
-	if local.z == 0: _rebuild_chunk(c + Vector3i(0, 0, -1))
-	if local.z == CHUNK - 1: _rebuild_chunk(c + Vector3i(0, 0, 1))
+func is_solid(p: Vector3i) -> bool:
+	return get_density(p) >= ISO
 
 
-## Height of the top solid block of the terrain column at (x, z) when generated.
-func surface_height(x: int, z: int) -> int:
+## Ground height (where the surface is) of the column at (x, z) when generated.
+func surface_height(x: int, z: int) -> float:
 	return _heights[x + z * size.x]
 
 
-## Steps through the grid along a ray (Amanatides & Woo).
-## Returns {"hit": bool, "pos": Vector3i, "normal": Vector3i, "id": int}.
-func raycast(origin: Vector3, direction: Vector3, max_distance: float) -> Dictionary:
-	var dir := direction.normalized()
-	var pos := Vector3i(floori(origin.x), floori(origin.y), floori(origin.z))
-	var step := Vector3i(int(signf(dir.x)), int(signf(dir.y)), int(signf(dir.z)))
-	var t_max := Vector3(INF, INF, INF)
-	var t_delta := Vector3(INF, INF, INF)
-	for axis in 3:
-		if dir[axis] > 0.0:
-			t_delta[axis] = 1.0 / dir[axis]
-			t_max[axis] = (floor(origin[axis]) + 1.0 - origin[axis]) * t_delta[axis]
-		elif dir[axis] < 0.0:
-			t_delta[axis] = -1.0 / dir[axis]
-			t_max[axis] = (origin[axis] - floor(origin[axis])) * t_delta[axis]
-	var normal := Vector3i.ZERO
-	var t := 0.0
-	while t <= max_distance:
-		var id := get_block(pos)
-		if id != Blocks.AIR:
-			return {"hit": true, "pos": pos, "normal": normal, "id": id}
-		if t_max.x < t_max.y and t_max.x < t_max.z:
-			pos.x += step.x
-			t = t_max.x
-			t_max.x += t_delta.x
-			normal = Vector3i(-step.x, 0, 0)
-		elif t_max.y < t_max.z:
-			pos.y += step.y
-			t = t_max.y
-			t_max.y += t_delta.y
-			normal = Vector3i(0, -step.y, 0)
-		else:
-			pos.z += step.z
-			t = t_max.z
-			t_max.z += t_delta.z
-			normal = Vector3i(0, 0, -step.z)
-	return {"hit": false}
+## The material at a point on the surface, e.g. where a ray hit.
+## Looks at the grid points around it and picks the most solid one.
+func material_at(world_pos: Vector3) -> int:
+	var base := Vector3i(floori(world_pos.x), floori(world_pos.y), floori(world_pos.z))
+	var best := -1
+	var best_id := Blocks.AIR
+	for dy in range(-1, 2):
+		for dz in range(-1, 2):
+			for dx in range(-1, 2):
+				var p := base + Vector3i(dx, dy, dz)
+				if not in_bounds(p):
+					continue
+				var i := _index(p.x, p.y, p.z)
+				if density[i] < ISO:
+					continue
+				# Prefer solid points close to the hit.
+				var score := density[i] - int((Vector3(p) - world_pos).length() * 200.0)
+				if score > best:
+					best = score
+					best_id = material[i]
+	return best_id
 
 
-# --- Generation ---------------------------------------------------------------
+## Carves a sphere out of the world. Unbreakable materials are left alone.
+## Returns how much of each material was removed, in blocks (material id -> float).
+func dig(center: Vector3, radius: float) -> Dictionary:
+	var removed := {}
+	var lo := Vector3i(floori(center.x - radius - 1), floori(center.y - radius - 1), floori(center.z - radius - 1))
+	var hi := Vector3i(ceili(center.x + radius + 1), ceili(center.y + radius + 1), ceili(center.z + radius + 1))
+	lo = lo.clamp(Vector3i.ZERO, size - Vector3i.ONE)
+	hi = hi.clamp(Vector3i.ZERO, size - Vector3i.ONE)
+	var changed := false
+	for y in range(lo.y, hi.y + 1):
+		for z in range(lo.z, hi.z + 1):
+			for x in range(lo.x, hi.x + 1):
+				var i := _index(x, y, z)
+				var old := density[i]
+				if old == 0:
+					continue
+				var id := material[i]
+				if _hardness[id] < 0.0:
+					continue
+				var dist := Vector3(x, y, z).distance_to(center)
+				# Density of "outside the sphere": air at the middle, ramping up past the edge.
+				var target := clampi(int(ISO + (dist - radius) * DENSITY_SLOPE), 0, 255)
+				if target < old:
+					density[i] = target
+					changed = true
+					# Only the solid part counts toward what you collect.
+					var amount := (minf(old, 255.0) - maxf(target, 0.0)) / 255.0
+					removed[id] = removed.get(id, 0.0) + amount
+	if changed:
+		_rebuild_region(lo, hi)
+	return removed
+
+
+## Turns all chunk meshes back on after a bulk change to the arrays.
+func rebuild_all() -> void:
+	_build_all_chunks()
+
+
+# --- Generation -------------------------------------------------------------------
 
 func _generate_terrain(seed_value: int) -> void:
 	var hills := FastNoiseLite.new()
@@ -141,6 +191,7 @@ func _generate_terrain(seed_value: int) -> void:
 
 	var ore_table := _build_ore_table()
 	var center := Vector2(size.x / 2.0, size.z / 2.0)
+	var sx := size.x
 	var sxz := size.x * size.z
 	_heights.resize(sxz)
 
@@ -148,27 +199,34 @@ func _generate_terrain(seed_value: int) -> void:
 		for x in size.x:
 			var h := WorldConfig.SURFACE_Y + hills.get_noise_2d(x, z) * WorldConfig.HILL_HEIGHT
 			# Flatten the ground around the base.
-			var flat := clampf((Vector2(x + 0.5, z + 0.5).distance_to(center) - WorldConfig.FLAT_RADIUS) / 8.0, 0.0, 1.0)
-			var height := clampi(roundi(lerpf(WorldConfig.SURFACE_Y, h, flat)), WorldConfig.CORE_ROWS + 1, size.y - 12)
-			_heights[x + z * size.x] = height
-			for y in height + 1:
+			var flat := clampf((Vector2(x, z).distance_to(center) - WorldConfig.FLAT_RADIUS) / 8.0, 0.0, 1.0)
+			h = clampf(lerpf(WorldConfig.SURFACE_Y, h, flat), WorldConfig.CORE_ROWS + 2, size.y - 14)
+			_heights[x + z * sx] = h
+			var top := mini(ceili(h) + 1, size.y - 1)
+			for y in top + 1:
+				var d := clampi(int(ISO + (h - y) * DENSITY_SLOPE), 0, 255)
+				if d == 0:
+					continue
 				var id: int
-				var below_ground := height - y
+				var below_ground := h - y
 				var depth := WorldConfig.SURFACE_Y - y
 				if y < WorldConfig.CORE_ROWS:
 					id = Blocks.CORE
-				elif below_ground == 0:
+					d = 255
+				elif below_ground < 1.6:
 					id = Blocks.GRASS
 				elif below_ground <= WorldConfig.DIRT_DEPTH:
 					id = Blocks.DIRT
 				else:
 					id = Blocks.STONE if depth < WorldConfig.BASALT_DEPTH else Blocks.BASALT
-					var d := clampi(depth, 0, ore_table.size() - 1)
+					var di := clampi(depth, 0, ore_table.size() - 1)
 					var t := clampf(float(depth) / WorldConfig.SURFACE_Y, 0.0, 1.0)
 					var threshold := lerpf(WorldConfig.ORE_THRESHOLD_TOP, WorldConfig.ORE_THRESHOLD_BOTTOM, t)
-					if not ore_table[d].is_empty() and veins.get_noise_3d(x, y, z) > threshold:
-						id = _pick_ore(ore_table[d], x, y, z)
-				data[x + z * size.x + y * sxz] = id
+					if not ore_table[di].is_empty() and veins.get_noise_3d(x, y, z) > threshold:
+						id = _pick_ore(ore_table[di], x, y, z)
+				var i := x + z * sx + y * sxz
+				density[i] = d
+				material[i] = id
 
 
 ## For each depth, the ores allowed there with cumulative weights.
@@ -201,52 +259,98 @@ func _generate_trees(seed_value: int) -> void:
 	rng.seed = seed_value + 7
 	var center := Vector2(size.x / 2.0, size.z / 2.0)
 	for i in WorldConfig.TREE_ATTEMPTS:
-		var x := rng.randi_range(3, size.x - 4)
-		var z := rng.randi_range(3, size.z - 4)
+		var x := rng.randi_range(4, size.x - 5)
+		var z := rng.randi_range(4, size.z - 5)
 		if Vector2(x, z).distance_to(center) < WorldConfig.FLAT_RADIUS + 4.0:
 			continue
 		var ground := surface_height(x, z)
-		if get_block(Vector3i(x, ground, z)) != Blocks.GRASS:
-			continue
-		var trunk := rng.randi_range(4, 6)
+		var trunk := rng.randf_range(4.0, 6.5)
 		var top := ground + trunk
-		if top + 2 >= size.y:
+		if top + 4 >= size.y:
 			continue
-		for dy in range(-2, 2):
-			var r := 2 if dy < 0 else 1
-			for dx in range(-r, r + 1):
-				for dz in range(-r, r + 1):
-					if absi(dx) == r and absi(dz) == r and rng.randf() < 0.6:
-						continue
-					var p := Vector3i(x + dx, top + dy, z + dz)
-					if get_block(p) == Blocks.AIR and in_bounds(p):
-						data[_index(p.x, p.y, p.z)] = Blocks.LEAVES
-		for y in range(ground + 1, top + 1):
-			data[_index(x, y, z)] = Blocks.WOOD
+		var base := Vector3(x, ground - 1.0, z)
+		_add_capsule(base, Vector3(x, top, z), 0.55, Blocks.WOOD)
+		var canopy := rng.randf_range(1.9, 2.6)
+		_add_sphere(Vector3(x, top + 0.6, z), canopy, Blocks.LEAVES)
+		_add_sphere(Vector3(x + rng.randf_range(-1, 1), top - 0.4, z + rng.randf_range(-1, 1)), canopy * 0.8, Blocks.LEAVES)
+
+
+## Adds solid material in a sphere (keeps whatever is denser already).
+func _add_sphere(c: Vector3, r: float, id: int) -> void:
+	_add_shape(c - Vector3.ONE * (r + 1), c + Vector3.ONE * (r + 1), id,
+		func(p: Vector3) -> float: return r - p.distance_to(c))
+
+
+func _add_capsule(a: Vector3, b: Vector3, r: float, id: int) -> void:
+	var lo := Vector3(minf(a.x, b.x), minf(a.y, b.y), minf(a.z, b.z)) - Vector3.ONE * (r + 1)
+	var hi := Vector3(maxf(a.x, b.x), maxf(a.y, b.y), maxf(a.z, b.z)) + Vector3.ONE * (r + 1)
+	_add_shape(lo, hi, id, func(p: Vector3) -> float:
+		var ab := b - a
+		var t := clampf((p - a).dot(ab) / ab.length_squared(), 0.0, 1.0)
+		return r - p.distance_to(a + ab * t))
+
+
+## inside(p) returns how far inside the shape p is (negative = outside).
+func _add_shape(lo_f: Vector3, hi_f: Vector3, id: int, inside: Callable) -> void:
+	var lo := Vector3i(floori(lo_f.x), floori(lo_f.y), floori(lo_f.z)).clamp(Vector3i.ZERO, size - Vector3i.ONE)
+	var hi := Vector3i(ceili(hi_f.x), ceili(hi_f.y), ceili(hi_f.z)).clamp(Vector3i.ZERO, size - Vector3i.ONE)
+	for y in range(lo.y, hi.y + 1):
+		for z in range(lo.z, hi.z + 1):
+			for x in range(lo.x, hi.x + 1):
+				var d := clampi(int(ISO + inside.call(Vector3(x, y, z)) * DENSITY_SLOPE), 0, 255)
+				var i := _index(x, y, z)
+				if d > density[i]:
+					if density[i] < ISO:
+						material[i] = id
+					density[i] = d
 
 
 func _generate_base() -> void:
 	var cx := size.x / 2
 	var cz := size.z / 2
-	var y := surface_height(cx, cz)
-	for dx in range(-WorldConfig.BASE_RADIUS, WorldConfig.BASE_RADIUS):
-		for dz in range(-WorldConfig.BASE_RADIUS, WorldConfig.BASE_RADIUS):
-			data[_index(cx + dx, y, cz + dz)] = Blocks.BASE_FLOOR
-	base_position = Vector3(cx, y + 1, cz)
+	var h := float(WorldConfig.SURFACE_Y)
+	var r := WorldConfig.BASE_RADIUS
+	# A flat, unbreakable slab a few blocks thick.
+	for y in range(int(h) - 3, int(h) + 2):
+		for dz in range(-r, r + 1):
+			for dx in range(-r, r + 1):
+				if dx * dx + dz * dz > r * r:
+					continue
+				var i := _index(cx + dx, y, cz + dz)
+				density[i] = clampi(int(ISO + (h - y) * DENSITY_SLOPE), 0, 255)
+				material[i] = Blocks.BASE_FLOOR if density[i] > 0 else Blocks.AIR
+	base_position = Vector3(cx, h, cz)
 
 
-# --- Meshing ------------------------------------------------------------------
+## Makes the outer walls and ceiling air so the world's edges are closed off.
+func _seal_edges() -> void:
+	for y in size.y:
+		for z in size.z:
+			for x in size.x:
+				if x == 0 or z == 0 or x == size.x - 1 or z == size.z - 1 or y == size.y - 1:
+					density[_index(x, y, z)] = 0
 
-func _build_face_table() -> void:
-	# Godot treats clockwise triangles as front faces. Fix each quad's order
-	# so its triangles face outward along the face normal.
-	_faces.clear()
-	for f in 6:
-		var c: Array = FACE_CORNERS[f].duplicate()
-		var n := Vector3(DIRS[f])
-		if (c[1] - c[0]).cross(c[2] - c[0]).dot(n) > 0.0:
-			c.reverse()
-		_faces.append([c[0], c[1], c[2], c[0], c[2], c[3]])
+
+# --- Meshing ----------------------------------------------------------------------
+
+func _build_edge_tables() -> void:
+	# For a grid edge from point p to p + axis, these are the 4 cells around it,
+	# listed in a loop. Godot draws clockwise triangles as front faces, so work out
+	# per axis whether the loop has to be reversed to face along +axis.
+	var cells := [
+		[Vector3i(0, -1, -1), Vector3i(0, 0, -1), Vector3i(0, 0, 0), Vector3i(0, -1, 0)],
+		[Vector3i(-1, 0, -1), Vector3i(-1, 0, 0), Vector3i(0, 0, 0), Vector3i(0, 0, -1)],
+		[Vector3i(-1, -1, 0), Vector3i(0, -1, 0), Vector3i(0, 0, 0), Vector3i(-1, 0, 0)],
+	]
+	var axes := [Vector3.RIGHT, Vector3.UP, Vector3.BACK]
+	_edge_cells = cells
+	_edge_flip = []
+	for a in 3:
+		var c: Array = cells[a]
+		var p0 := Vector3(c[0]) + Vector3(0.5, 0.5, 0.5)
+		var p1 := Vector3(c[1]) + Vector3(0.5, 0.5, 0.5)
+		var p2 := Vector3(c[2]) + Vector3(0.5, 0.5, 0.5)
+		_edge_flip.append((p1 - p0).cross(p2 - p0).dot(axes[a]) > 0.0)
 
 
 func _build_all_chunks() -> void:
@@ -269,12 +373,19 @@ func _build_all_chunks() -> void:
 				_rebuild_chunk(c)
 
 
+## Rebuilds every chunk whose mesh depends on grid points in [lo, hi].
+func _rebuild_region(lo: Vector3i, hi: Vector3i) -> void:
+	var c_lo := (lo - Vector3i.ONE).clamp(Vector3i.ZERO, size) / CHUNK
+	var c_hi := (hi + Vector3i.ONE).clamp(Vector3i.ZERO, size) / CHUNK
+	for cy in range(c_lo.y, c_hi.y + 1):
+		for cz in range(c_lo.z, c_hi.z + 1):
+			for cx in range(c_lo.x, c_hi.x + 1):
+				_rebuild_chunk(Vector3i(cx, cy, cz))
+
+
 func _rebuild_chunk(c: Vector3i) -> void:
 	if not _chunks.has(c):
 		return
-	var verts := PackedVector3Array()
-	var normals := PackedVector3Array()
-	var colors := PackedColorArray()
 	var sx := size.x
 	var sy := size.y
 	var sz := size.z
@@ -282,40 +393,120 @@ func _rebuild_chunk(c: Vector3i) -> void:
 	var x0 := c.x * CHUNK
 	var y0 := c.y * CHUNK
 	var z0 := c.z * CHUNK
-	var block_colors := []
-	for d in Blocks.DEFS:
-		block_colors.append(d["color"])
+	# Cells this chunk needs vertices for: its own, plus one row before on each axis.
+	var cx0 := maxi(x0 - 1, 0)
+	var cy0 := maxi(y0 - 1, 0)
+	var cz0 := maxi(z0 - 1, 0)
+	var cx1 := mini(x0 + CHUNK, sx - 1)
+	var cy1 := mini(y0 + CHUNK, sy - 1)
+	var cz1 := mini(z0 + CHUNK, sz - 1)
+	if cx0 >= cx1 or cy0 >= cy1 or cz0 >= cz1:
+		_set_chunk_mesh(c, PackedVector3Array(), PackedVector3Array(), PackedColorArray(), PackedInt32Array())
+		return
+	var lx := cx1 - cx0
+	var lz := cz1 - cz0
+	var lxz := lx * lz
+	var cell_vertex := PackedInt32Array()
+	cell_vertex.resize(lx * (cy1 - cy0) * lz)
+	cell_vertex.fill(-1)
 
+	var verts := PackedVector3Array()
+	var normals := PackedVector3Array()
+	var colors := PackedColorArray()
+	var indices := PackedInt32Array()
+	var corner_offsets := PackedInt32Array()
+	for k in 8:
+		var o: Vector3i = CORNERS[k]
+		corner_offsets.append(o.x + o.z * sx + o.y * sxz)
+	var d := PackedInt32Array()
+	d.resize(8)
+
+	# Pass 1: one vertex per cell the surface passes through.
+	for y in range(cy0, cy1):
+		for z in range(cz0, cz1):
+			for x in range(cx0, cx1):
+				var base := x + z * sx + y * sxz
+				var mask := 0
+				for k in 8:
+					var v := density[base + corner_offsets[k]]
+					d[k] = v
+					if v >= ISO:
+						mask |= 1 << k
+				if mask == 0 or mask == 255:
+					continue
+				var sum := Vector3.ZERO
+				var count := 0
+				for e in EDGES:
+					var a: int = e[0]
+					var b: int = e[1]
+					if ((mask >> a) & 1) != ((mask >> b) & 1):
+						var t := (ISO - 0.5 - d[a]) / float(d[b] - d[a])
+						sum += Vector3(CORNERS[a]).lerp(Vector3(CORNERS[b]), t)
+						count += 1
+				var pos := Vector3(x, y, z) + sum / count
+				var grad := Vector3(
+					(d[1] + d[3] + d[5] + d[7]) - (d[0] + d[2] + d[4] + d[6]),
+					(d[2] + d[3] + d[6] + d[7]) - (d[0] + d[1] + d[4] + d[5]),
+					(d[4] + d[5] + d[6] + d[7]) - (d[0] + d[1] + d[2] + d[3]))
+				var normal := -grad.normalized() if grad.length_squared() > 0.0 else Vector3.UP
+				# Color from the most solid corner's material.
+				var best := 0
+				for k in range(1, 8):
+					if d[k] > d[best]:
+						best = k
+				var id := material[base + corner_offsets[best]]
+				var shade := 0.9 + 0.2 * _hash01(x, y, z)
+				var col := _block_colors[id] * shade
+				col.a = 1.0
+				cell_vertex[(x - cx0) + (z - cz0) * lx + (y - cy0) * lxz] = verts.size()
+				verts.append(pos)
+				normals.append(normal)
+				colors.append(col)
+
+	# Pass 2: a quad for every grid edge owned by this chunk that crosses the surface.
 	for y in range(y0, mini(y0 + CHUNK, sy)):
 		for z in range(z0, mini(z0 + CHUNK, sz)):
 			for x in range(x0, mini(x0 + CHUNK, sx)):
-				var id := data[x + z * sx + y * sxz]
-				if id == Blocks.AIR:
-					continue
-				var jitter := 0.9 + 0.2 * _hash01(x, y, z)
-				var p := Vector3(x, y, z)
-				for f in 6:
-					var d: Vector3i = DIRS[f]
-					var nx := x + d.x
-					var ny := y + d.y
-					var nz := z + d.z
-					if nx >= 0 and ny >= 0 and nz >= 0 and nx < sx and ny < sy and nz < sz:
-						if data[nx + nz * sx + ny * sxz] != Blocks.AIR:
-							continue
-					elif ny < 0:
+				var i := x + z * sx + y * sxz
+				var solid := density[i] >= ISO
+				for a in 3:
+					var nx := x + (1 if a == 0 else 0)
+					var ny := y + (1 if a == 1 else 0)
+					var nz := z + (1 if a == 2 else 0)
+					if nx >= sx or ny >= sy or nz >= sz:
 						continue
-					var col: Color = block_colors[id] * (FACE_SHADE[f] * jitter)
-					col.a = 1.0
-					var n := Vector3(d)
-					for corner in _faces[f]:
-						verts.append(p + corner)
-						normals.append(n)
-						colors.append(col)
+					if (density[nx + nz * sx + ny * sxz] >= ISO) == solid:
+						continue
+					var quad := PackedInt32Array()
+					var ok := true
+					for off in _edge_cells[a]:
+						var qx: int = x + off.x
+						var qy: int = y + off.y
+						var qz: int = z + off.z
+						if qx < cx0 or qy < cy0 or qz < cz0 or qx >= cx1 or qy >= cy1 or qz >= cz1:
+							ok = false
+							break
+						var vi := cell_vertex[(qx - cx0) + (qz - cz0) * lx + (qy - cy0) * lxz]
+						if vi < 0:
+							ok = false
+							break
+						quad.append(vi)
+					if not ok:
+						continue
+					# Solid on the near side means the surface faces +axis.
+					if _edge_flip[a] == solid:
+						indices.append_array([quad[0], quad[3], quad[2], quad[0], quad[2], quad[1]])
+					else:
+						indices.append_array([quad[0], quad[1], quad[2], quad[0], quad[2], quad[3]])
 
+	_set_chunk_mesh(c, verts, normals, colors, indices)
+
+
+func _set_chunk_mesh(c: Vector3i, verts: PackedVector3Array, normals: PackedVector3Array, colors: PackedColorArray, indices: PackedInt32Array) -> void:
 	var entry: Dictionary = _chunks[c]
 	var mi: MeshInstance3D = entry["mesh"]
 	var cs: CollisionShape3D = entry["shape"]
-	if verts.is_empty():
+	if indices.is_empty():
 		mi.mesh = null
 		cs.shape = null
 		return
@@ -324,16 +515,21 @@ func _rebuild_chunk(c: Vector3i) -> void:
 	arrays[Mesh.ARRAY_VERTEX] = verts
 	arrays[Mesh.ARRAY_NORMAL] = normals
 	arrays[Mesh.ARRAY_COLOR] = colors
+	arrays[Mesh.ARRAY_INDEX] = indices
 	var mesh := ArrayMesh.new()
 	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
 	mesh.surface_set_material(0, _material)
 	mi.mesh = mesh
+	var faces := PackedVector3Array()
+	faces.resize(indices.size())
+	for k in indices.size():
+		faces[k] = verts[indices[k]]
 	var shape := ConcavePolygonShape3D.new()
-	shape.set_faces(verts)
+	shape.set_faces(faces)
 	cs.shape = shape
 
 
-# --- Helpers ------------------------------------------------------------------
+# --- Helpers ----------------------------------------------------------------------
 
 func _index(x: int, y: int, z: int) -> int:
 	return x + z * size.x + y * size.x * size.z

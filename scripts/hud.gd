@@ -3,10 +3,13 @@ extends CanvasLayer
 ## On-screen info: money, backpack, depth, what you are aiming at, mining progress.
 
 var player: Player
+var shop: Shop
 
 var _money: Label
 var _bag: Label
 var _depth: Label
+var _tool: Label
+var _prompt: Label
 var _target: Label
 var _progress: ProgressBar
 var _toast: Label
@@ -25,6 +28,14 @@ func _ready() -> void:
 	_bag.position = Vector2(20, 56)
 	_depth = _label(root, 18)
 	_depth.position = Vector2(20, 82)
+	_tool = _label(root, 16, Color(1, 1, 1, 0.85))
+	_tool.position = Vector2(20, 108)
+
+	_prompt = _label(root, 22, Color(1.0, 0.85, 0.4))
+	_prompt.set_anchors_and_offsets_preset(Control.PRESET_CENTER)
+	_prompt.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_prompt.custom_minimum_size = Vector2(400, 0)
+	_prompt.position += Vector2(-200, 90)
 
 	var crosshair := _label(root, 26)
 	crosshair.text = "+"
@@ -53,7 +64,7 @@ func _ready() -> void:
 	_toast.position += Vector2(-350, 20)
 
 	var help := _label(root, 14, Color(1, 1, 1, 0.7))
-	help.text = "WASD move   Space jump   Shift sprint   Hold left click mine   R back to base   Esc free mouse"
+	help.text = "WASD move   Space jump   Shift sprint   Hold left click mine   E shop   R back to base   Esc free mouse"
 	help.set_anchors_and_offsets_preset(Control.PRESET_BOTTOM_LEFT)
 	help.position += Vector2(20, -34)
 
@@ -62,15 +73,18 @@ func _ready() -> void:
 
 func _process(delta: float) -> void:
 	_money.text = "$%d" % Game.money
-	var bag_text := "Backpack %d / %d" % [Game.backpack_count(), Game.backpack_capacity]
+	var bag_text := "Backpack %d / %d" % [Game.backpack_count(), Game.backpack_capacity()]
 	if Game.backpack_count() > 0:
 		bag_text += "   (worth $%d)" % Game.backpack_value()
 	if Game.is_backpack_full():
 		bag_text += "   FULL"
 	_bag.text = bag_text
 
+	_tool.text = "%s   Dig size %.1f" % [Game.tool()["name"], Game.dig_radius()]
+	_prompt.text = "Press E to shop" if shop and shop.is_player_near() and not shop.is_open() else ""
+
 	if player:
-		var feet_y := floori(player.global_position.y - 0.85)
+		var feet_y := floori(player.global_position.y - 0.85 + 0.2)
 		var depth := WorldConfig.SURFACE_Y - feet_y
 		_depth.text = "Depth %dm" % depth if depth > 0 else "Surface"
 		if player.target["hit"]:

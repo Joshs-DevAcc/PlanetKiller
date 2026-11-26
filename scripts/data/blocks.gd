@@ -4,7 +4,7 @@ extends RefCounted
 ##
 ## This is the file to edit when tuning the economy:
 ##   value    = money paid per block at the sell pad
-##   hardness = seconds to mine with the starter pickaxe (power 1.0).
+##   hardness = how tough it is to dig. Higher takes more hits; see Upgrades.MINING_RATE.
 ##              A negative hardness means the block cannot be mined.
 ##   collect  = false means the block is destroyed instead of going in the backpack
 ##   color    = base color used when drawing the block
@@ -41,7 +41,7 @@ const DEFS := [
 	{"name": "Sapphire",   "value": 60,  "hardness": 2.2,  "collect": true,  "color": Color(0.18, 0.4, 0.95)},
 	{"name": "Ruby",       "value": 100, "hardness": 2.8,  "collect": true,  "color": Color(0.9, 0.12, 0.2)},
 	{"name": "Core",       "value": 0,   "hardness": -1.0, "collect": false, "color": Color(0.35, 0.08, 0.05)},
-	{"name": "Base Floor", "value": 0,   "hardness": -1.0, "collect": false, "color": Color(0.75, 0.75, 0.7)},
+	{"name": "Base Floor", "value": 0,   "hardness": -1.0, "collect": false, "color": Color(0.32, 0.3, 0.3)},
 ]
 
 
