@@ -5,3 +5,6 @@ export_presets.cfg
 # OS
 .DS_Store
 Thumbs.db
+
+# Godot import files for docs images (docs/ has a .gdignore, but older checkouts may have them)
+docs/*.import
