@@ -31,6 +31,7 @@ func _run() -> void:
 	for i in 5:
 		var p := Vector3(c.x + i * 2.5, world.surface_height(int(c.x + i * 2.5), int(c.z)), c.z)
 		world.dig(p, 1.3 + i * 0.5)
+	await _settle(world)
 	player.global_position = base + Vector3(-6, 1.5, 12)
 	player.rotation.y = deg_to_rad(60)
 	player.camera.rotation.x = -0.35
@@ -41,6 +42,7 @@ func _run() -> void:
 	var pit := base + Vector3(18, 0, -14)
 	for depth in range(0, 40, 2):
 		world.dig(pit + Vector3(0, -depth, 0), 5.0)
+	await _settle(world)
 	player.global_position = pit + Vector3(-7, 1.5, 0)
 	player.rotation.y = deg_to_rad(-90)
 	player.camera.rotation.x = -0.75
@@ -51,7 +53,7 @@ func _run() -> void:
 	var g: Node = root.get_node("Game")
 	g.tool_level = Upgrades.TOOLS.size() - 1
 	g.upgraded.emit("tool")
-	player.global_position = pit + Vector3(0, -38, 0)
+	player.global_position = pit + Vector3(0, -40, 0)
 	player.rotation.y = deg_to_rad(30)
 	player.camera.rotation.x = -0.1
 	await _frames(30)
@@ -73,6 +75,13 @@ func _save(path: String) -> void:
 	var img := root.get_viewport().get_texture().get_image()
 	img.save_png(path)
 	print("saved ", path)
+
+
+func _settle(world) -> void:
+	for i in 300:
+		await process_frame
+		if not world.is_busy():
+			break
 
 
 func _frames(n: int) -> void:

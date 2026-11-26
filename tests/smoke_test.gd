@@ -21,9 +21,9 @@ func _run() -> void:
 	var player = main.player
 	var shop = main.shop
 	var game: Node = root.get_node("Game")
-	_check(world.size == WorldConfig.WORLD_SIZE, "world has the configured size")
+	_check(world.world_size().is_equal_approx(WorldConfig.WORLD_SIZE), "world has the configured size")
 	_check(player.is_on_floor(), "player is standing on the ground (at %s)" % player.global_position)
-	print("  info meshing took %d ms" % world.last_build_ms)
+	print("  info generating took %d ms, meshing %d ms, grid %s" % [world.last_generate_ms, world.last_build_ms, world.size])
 
 	# Every material the generator promises should exist somewhere as solid ground.
 	var counts := {}
@@ -50,7 +50,7 @@ func _run() -> void:
 	var digs := 0
 	for step in 4:
 		var top := _surface_at(world, x, z)
-		var p := Vector3(x + 0.5, top, z + 0.5)
+		var p := Vector3(x, top, z)
 		var id: int = world.material_at(p + Vector3.DOWN * 0.3)
 		player.target = {"hit": true, "pos": p, "normal": Vector3.UP, "id": id}
 		var before := top
@@ -58,6 +58,7 @@ func _run() -> void:
 			player.hit()
 			if _surface_at(world, x, z) < before - 0.5:
 				break
+		await _frames(3)
 		var after := _surface_at(world, x, z)
 		_check(after < before - 0.5, "dig %d through %s lowered the ground from %.1f to %.1f" % [step + 1, Blocks.block_name(id), before, after])
 		digs += 1
@@ -102,7 +103,7 @@ func _run() -> void:
 	game.backpack = {Blocks.STONE: float(game.backpack_capacity())}
 	var fx := x + 8
 	var ftop := _surface_at(world, fx, z)
-	player.target = {"hit": true, "pos": Vector3(fx + 0.5, ftop, z + 0.5), "normal": Vector3.UP, "id": Blocks.GRASS + 1}
+	player.target = {"hit": true, "pos": Vector3(fx, ftop, z), "normal": Vector3.UP, "id": Blocks.GRASS + 1}
 	for i in 40:
 		player.hit()
 	_check(absf(_surface_at(world, fx, z) - ftop) < 0.01, "a full backpack stops digging")
@@ -111,13 +112,16 @@ func _run() -> void:
 	quit(1 if _failures > 0 else 0)
 
 
-## Height of the topmost surface in a column, from the density data.
-func _surface_at(world, x: int, z: int) -> float:
+## Height in meters of the topmost surface in a column (x, z in meters), from the density data.
+func _surface_at(world, x: float, z: float) -> float:
+	var vs: float = world.voxel_size
+	var gx := roundi(x / vs)
+	var gz := roundi(z / vs)
 	for y in range(world.size.y - 2, -1, -1):
-		var d_hi: int = world.get_density(Vector3i(x, y + 1, z))
-		var d_lo: int = world.get_density(Vector3i(x, y, z))
+		var d_hi: int = world.get_density(Vector3i(gx, y + 1, gz))
+		var d_lo: int = world.get_density(Vector3i(gx, y, gz))
 		if d_lo >= VoxelWorld.ISO and d_hi < VoxelWorld.ISO:
-			return y + (d_lo - (VoxelWorld.ISO - 0.5)) / float(d_lo - d_hi)
+			return (y + (d_lo - (VoxelWorld.ISO - 0.5)) / float(d_lo - d_hi)) * vs
 	return 0.0
 
 

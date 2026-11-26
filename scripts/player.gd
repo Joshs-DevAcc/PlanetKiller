@@ -317,7 +317,7 @@ func _box(parent: Node3D, size: Vector3, pos: Vector3, mat: Material) -> MeshIns
 func _make_pickaxe(head_color: Color) -> Node3D:
 	var root := Node3D.new()
 	var wood := _mat(Color(0.5, 0.33, 0.18), 0.0, 0.8)
-	var metal := _mat(head_color * 0.8, 0.15, 0.5)
+	var metal := _mat(head_color * 0.8, 0.0, 0.45)
 	_box(root, Vector3(0.05, 0.55, 0.05), Vector3(0, 0.1, 0), wood)
 	_box(root, Vector3(0.34, 0.05, 0.05), Vector3(0, 0.37, 0), metal)
 	_box(root, Vector3(0.09, 0.08, 0.08), Vector3(0, 0.37, 0), metal)
@@ -362,11 +362,8 @@ func _make_dig_preview() -> MeshInstance3D:
 	sphere.height = 2.0
 	sphere.radial_segments = 24
 	sphere.rings = 12
-	var mat := StandardMaterial3D.new()
-	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	mat.albedo_color = Color(1.0, 0.95, 0.6, 0.12)
-	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	var mat := ShaderMaterial.new()
+	mat.shader = preload("res://shaders/dig_preview.gdshader")
 	sphere.material = mat
 	mi.mesh = sphere
 	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF

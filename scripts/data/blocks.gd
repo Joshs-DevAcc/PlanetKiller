@@ -29,14 +29,14 @@ const BASE_FLOOR := 13
 
 const DEFS := [
 	{"name": "Air",        "value": 0,   "hardness": 0.0,  "collect": false, "color": Color(0, 0, 0)},
-	{"name": "Grass",      "value": 0,   "hardness": 0.3,  "collect": false, "color": Color(0.36, 0.63, 0.24)},
+	{"name": "Grass",      "value": 0,   "hardness": 0.3,  "collect": false, "color": Color(0.3, 0.54, 0.2)},
 	{"name": "Dirt",       "value": 1,   "hardness": 0.45, "collect": true,  "color": Color(0.47, 0.32, 0.2)},
 	{"name": "Wood",       "value": 2,   "hardness": 0.7,  "collect": true,  "color": Color(0.45, 0.3, 0.16)},
-	{"name": "Leaves",     "value": 0,   "hardness": 0.15, "collect": false, "color": Color(0.22, 0.5, 0.2)},
+	{"name": "Leaves",     "value": 0,   "hardness": 0.15, "collect": false, "color": Color(0.2, 0.42, 0.18)},
 	{"name": "Stone",      "value": 4,   "hardness": 0.9,  "collect": true,  "color": Color(0.52, 0.52, 0.54)},
 	{"name": "Basalt",     "value": 6,   "hardness": 1.4,  "collect": true,  "color": Color(0.27, 0.27, 0.31)},
 	{"name": "Coal",       "value": 8,   "hardness": 1.0,  "collect": true,  "color": Color(0.12, 0.12, 0.13)},
-	{"name": "Iron",       "value": 15,  "hardness": 1.4,  "collect": true,  "color": Color(0.8, 0.6, 0.45)},
+	{"name": "Iron",       "value": 15,  "hardness": 1.4,  "collect": true,  "color": Color(0.72, 0.42, 0.26)},
 	{"name": "Gold",       "value": 30,  "hardness": 1.7,  "collect": true,  "color": Color(0.98, 0.8, 0.2)},
 	{"name": "Sapphire",   "value": 60,  "hardness": 2.2,  "collect": true,  "color": Color(0.18, 0.4, 0.95)},
 	{"name": "Ruby",       "value": 100, "hardness": 2.8,  "collect": true,  "color": Color(0.9, 0.12, 0.2)},

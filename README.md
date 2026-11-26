@@ -6,9 +6,9 @@ is to strip the whole planet down to its core.
 
 ![The base, with the shop and sell pad](docs/screenshot.png)
 
-| Digging into the layers | The shop |
-| --- | --- |
-| ![A pit dug through grass, dirt and stone](docs/screenshot_pit.png) | ![The shop menu](docs/screenshot_shop.png) |
+| Craters in the hills | Ore flecks underground | The shop |
+| --- | --- | --- |
+| ![Craters dug into the hills](docs/screenshot_pit.png) | ![Gold and iron flecks in basalt](docs/screenshot_ores.png) | ![The shop menu](docs/screenshot_shop.png) |
 
 ## Play it
 
@@ -16,7 +16,8 @@ is to strip the whole planet down to its core.
 2. Open Godot, click **Import**, and pick the `project.godot` file in this folder.
 3. Press **F5** (or the ▶ button at the top right) to play.
 
-The first open takes a few seconds while Godot imports the project.
+The first open takes a few seconds while Godot imports the project, and each launch shows a
+short loading screen while the planet is built.
 If your computer's graphics are old and the game won't start, go to
 **Project > Project Settings > Rendering > Renderer** and switch to *Compatibility*.
 
@@ -46,18 +47,20 @@ teleport there) and step on it to sell everything. Then spend your money at the 
 | Dig size | Radius 1.3, 1.7, 2.2, 2.8, 3.5 blocks |
 | Backpack | 40, 80, 160, 320, 640 blocks |
 
+Ores show up as colored flecks in the rock. "Block" below means one cubic meter.
+
 | Layer | Found | Value per block |
 | --- | --- | --- |
 | Grass, leaves | Surface | $0 (not kept) |
-| Dirt | Top 4 blocks | $1 |
+| Dirt | Top 3m | $1 |
 | Wood | Trees | $2 |
-| Stone | Down to 28m | $4 |
-| Basalt | Below 28m, harder | $6 |
-| Coal | 3m to 40m | $8 |
-| Iron | 10m and deeper | $15 |
-| Gold | 24m and deeper | $30 |
-| Sapphire | 36m and deeper | $60 |
-| Ruby | 46m and deeper | $100 |
+| Stone | Down to 21m | $4 |
+| Basalt | Below 21m, harder | $6 |
+| Coal | 2m to 30m | $8 |
+| Iron | 8m and deeper | $15 |
+| Gold | 18m and deeper | $30 |
+| Sapphire | 27m and deeper | $60 |
+| Ruby | 34m and deeper | $100 |
 | Core | Bottom of the world | Unbreakable (for now) |
 
 ## Tuning the game
@@ -66,21 +69,23 @@ Most numbers live in two files, so you can change them without touching game cod
 
 - `scripts/data/blocks.gd`: every material's name, sell value, hardness and color.
 - `scripts/data/upgrades.gd`: shop prices and what each tool, dig size and backpack level gives you.
-- `scripts/data/world_config.gd`: world size, seed, hill height, layer depths, which ores appear at which depths and how rare they are.
+- `scripts/data/world_config.gd`: world size, voxel size, seed, hills, layer depths, which ores appear at which depths and how rare they are, trees and boulders.
 - `scripts/game_state.gd`: money, backpack and upgrade levels, plus how far you can reach.
 
 ## How it's built
 
-- `scripts/voxel_world.gd` stores a density and a material for every grid point and draws the
-  surface with *surface nets*, which gives smooth, rounded terrain instead of cubes. It is split
-  into 16×16×16 chunks, and a dig rebuilds only the chunks it touched.
+- `scripts/voxel_world.gd` stores a density and a material for every grid point (every 0.5m by
+  default) and draws the surface with *surface nets*, which gives smooth, rounded terrain instead of
+  cubes. It is split into 16×16×16 chunks. Chunks are built on background threads, at startup and
+  after every dig, so digging doesn't stutter.
+- `shaders/terrain.gdshader` gives the terrain its rock and soil detail and draws ores as flecks.
 - `scripts/player.gd` is the first-person miner: movement, the tool models, swing and drill
   animations, camera bob and shake, and digging.
 - `scripts/shop.gd` is the shop counter and menu, `scripts/sell_pad.gd` the sell zone,
   `scripts/hud.gd` the on-screen text, `scripts/main.gd` builds the scene.
 
 Everything is plain GDScript with no plugins, so the project opens in a stock Godot install.
-The world is 96×80×96 blocks for now. Going much bigger (a real planet with caves) will
+The world is 80×64×80 meters (160×128×160 voxels) for now. Going much bigger (a real planet with caves) will
 mean moving the terrain to the Voxel Tools engine module or threaded chunk loading, which
 is planned for a later step.
 
