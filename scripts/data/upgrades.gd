@@ -30,6 +30,23 @@ const BACKPACK := [
 	{"capacity": 640, "cost": 5000},
 ]
 
+## Weapons, fired with right click. damage per shot, shots_per_second, range in meters.
+const WEAPONS := [
+	{"name": "Pebble Blaster", "damage": 10.0, "shots_per_second": 3.0, "range": 18.0, "cost": 0,    "color": Color(0.6, 0.55, 0.5)},
+	{"name": "Ion Blaster",    "damage": 22.0, "shots_per_second": 4.0, "range": 24.0, "cost": 300,  "color": Color(0.3, 0.8, 1.0)},
+	{"name": "Plasma Rifle",   "damage": 45.0, "shots_per_second": 5.0, "range": 30.0, "cost": 1500, "color": Color(0.5, 1.0, 0.4)},
+	{"name": "Arc Cannon",     "damage": 90.0, "shots_per_second": 6.0, "range": 36.0, "cost": 5000, "color": Color(1.0, 0.45, 0.9)},
+]
+
+## Armor raises your max health.
+const ARMOR := [
+	{"name": "Work Clothes",  "health": 100, "cost": 0},
+	{"name": "Leather Vest",  "health": 150, "cost": 200},
+	{"name": "Miner's Plate", "health": 225, "cost": 800},
+	{"name": "Deep Suit",     "health": 350, "cost": 2500},
+	{"name": "Core Armor",    "health": 500, "cost": 7000},
+]
+
 ## How much mining progress one second of hitting gives, before power and hardness.
 ## A dig completes at 1.0. progress per hit = MINING_RATE * power / (hardness * hits_per_second)
 const MINING_RATE := 1.3

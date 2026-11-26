@@ -5,6 +5,9 @@ signal money_changed(amount: int)
 signal backpack_changed
 signal upgraded(kind: String)
 signal toast(text: String)
+signal health_changed(health: float, max_health: float)
+signal player_hurt(amount: float)
+signal player_died
 
 var money := 0
 ## Material id -> amount (floats, since digging removes partial blocks).
@@ -12,6 +15,10 @@ var backpack := {}
 var tool_level := 0
 var dig_level := 0
 var backpack_level := 0
+var weapon_level := 0
+var armor_level := 0
+var health := 100.0
+var kills := 0
 ## How far away you can mine, in blocks.
 var reach := 5.5
 ## True while a menu (like the shop) has the mouse.
@@ -32,6 +39,36 @@ func dig_radius() -> float:
 	return Upgrades.DIG_SIZE[dig_level]["radius"]
 
 
+func weapon() -> Dictionary:
+	return Upgrades.WEAPONS[weapon_level]
+
+
+func max_health() -> float:
+	return Upgrades.ARMOR[armor_level]["health"]
+
+
+func damage_player(amount: float) -> void:
+	if health <= 0.0:
+		return
+	health = maxf(health - amount, 0.0)
+	player_hurt.emit(amount)
+	health_changed.emit(health, max_health())
+	if health <= 0.0:
+		player_died.emit()
+
+
+func heal_player(amount: float) -> void:
+	var before := health
+	health = minf(health + amount, max_health())
+	if health != before:
+		health_changed.emit(health, max_health())
+
+
+func add_money(amount: int) -> void:
+	money += amount
+	money_changed.emit(money)
+
+
 func backpack_capacity() -> int:
 	return Upgrades.BACKPACK[backpack_level]["capacity"]
 
@@ -42,6 +79,8 @@ func ladder(kind: String) -> Array:
 		"tool": return Upgrades.TOOLS
 		"dig": return Upgrades.DIG_SIZE
 		"backpack": return Upgrades.BACKPACK
+		"weapon": return Upgrades.WEAPONS
+		"armor": return Upgrades.ARMOR
 	return []
 
 
@@ -50,6 +89,8 @@ func level(kind: String) -> int:
 		"tool": return tool_level
 		"dig": return dig_level
 		"backpack": return backpack_level
+		"weapon": return weapon_level
+		"armor": return armor_level
 	return 0
 
 
@@ -69,6 +110,11 @@ func buy(kind: String) -> bool:
 		"tool": tool_level += 1
 		"dig": dig_level += 1
 		"backpack": backpack_level += 1
+		"weapon": weapon_level += 1
+		"armor":
+			armor_level += 1
+			health = max_health()
+			health_changed.emit(health, max_health())
 	money_changed.emit(money)
 	upgraded.emit(kind)
 	return true
@@ -139,6 +185,11 @@ func _setup_input() -> void:
 	_add_keys("sprint", [KEY_SHIFT])
 	_add_keys("recall", [KEY_R])
 	_add_keys("interact", [KEY_E])
+	if not InputMap.has_action("attack"):
+		InputMap.add_action("attack")
+		var right := InputEventMouseButton.new()
+		right.button_index = MOUSE_BUTTON_RIGHT
+		InputMap.action_add_event("attack", right)
 	if not InputMap.has_action("mine"):
 		InputMap.add_action("mine")
 		var mouse := InputEventMouseButton.new()

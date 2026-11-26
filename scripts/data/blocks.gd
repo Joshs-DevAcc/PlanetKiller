@@ -26,6 +26,10 @@ const SAPPHIRE := 10
 const RUBY := 11
 const CORE := 12
 const BASE_FLOOR := 13
+const MAGMA_ROCK := 14
+const EMERALD := 15
+const DIAMOND := 16
+const STARSTONE := 17
 
 const DEFS := [
 	{"name": "Air",        "value": 0,   "hardness": 0.0,  "collect": false, "color": Color(0, 0, 0)},
@@ -42,6 +46,10 @@ const DEFS := [
 	{"name": "Ruby",       "value": 100, "hardness": 2.8,  "collect": true,  "color": Color(0.9, 0.12, 0.2)},
 	{"name": "Core",       "value": 0,   "hardness": -1.0, "collect": false, "color": Color(0.35, 0.08, 0.05)},
 	{"name": "Base Floor", "value": 0,   "hardness": -1.0, "collect": false, "color": Color(0.32, 0.3, 0.3)},
+	{"name": "Magma Rock", "value": 10,  "hardness": 2.0,  "collect": true,  "color": Color(0.3, 0.14, 0.1)},
+	{"name": "Emerald",    "value": 160, "hardness": 3.2,  "collect": true,  "color": Color(0.1, 0.8, 0.4)},
+	{"name": "Diamond",    "value": 300, "hardness": 4.0,  "collect": true,  "color": Color(0.75, 0.95, 1.0)},
+	{"name": "Starstone",  "value": 600, "hardness": 5.0,  "collect": true,  "color": Color(0.75, 0.4, 1.0)},
 ]
 
 

@@ -7,6 +7,8 @@ const ROWS := [
 	{"kind": "tool", "title": "Mining Tool", "stat": "tool"},
 	{"kind": "dig", "title": "Dig Size", "stat": "dig"},
 	{"kind": "backpack", "title": "Backpack", "stat": "backpack"},
+	{"kind": "weapon", "title": "Weapon", "stat": "weapon"},
+	{"kind": "armor", "title": "Armor", "stat": "armor"},
 ]
 
 var player: Player
@@ -164,7 +166,7 @@ func _build_ui() -> void:
 	center.add_child(panel)
 
 	var box := VBoxContainer.new()
-	box.add_theme_constant_override("separation", 14)
+	box.add_theme_constant_override("separation", 8)
 	panel.add_child(box)
 
 	var header := HBoxContainer.new()
@@ -193,7 +195,7 @@ func _build_ui() -> void:
 		button.add_theme_stylebox_override("hover", _button_style(Color(0.25, 0.68, 0.36)))
 		button.add_theme_stylebox_override("pressed", _button_style(Color(0.15, 0.45, 0.25)))
 		button.add_theme_stylebox_override("disabled", _button_style(Color(0.25, 0.25, 0.25)))
-		button.custom_minimum_size = Vector2(150, 56)
+		button.custom_minimum_size = Vector2(150, 50)
 		button.add_theme_font_size_override("font_size", 20)
 		button.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 		var kind: String = row["kind"]
@@ -239,6 +241,10 @@ func _describe(kind: String, entry: Dictionary) -> String:
 			return "%.1f block radius" % entry["radius"]
 		"backpack":
 			return "holds %d blocks" % entry["capacity"]
+		"weapon":
+			return "%s  (%d damage, %.0f shots/s)" % [entry["name"], entry["damage"], entry["shots_per_second"]]
+		"armor":
+			return "%s  (%d health)" % [entry["name"], entry["health"]]
 	return ""
 
 

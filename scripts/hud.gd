@@ -14,6 +14,10 @@ var _target: Label
 var _progress: ProgressBar
 var _toast: Label
 var _toast_time := 0.0
+var _health_bar: ProgressBar
+var _health_label: Label
+var _hurt_overlay: ColorRect
+var _hurt := 0.0
 
 
 func _ready() -> void:
@@ -21,6 +25,21 @@ func _ready() -> void:
 	root.set_anchors_preset(Control.PRESET_FULL_RECT)
 	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	add_child(root)
+
+	# Red flash at the screen edges when hurt.
+	_hurt_overlay = ColorRect.new()
+	_hurt_overlay.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_hurt_overlay.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var vignette := ShaderMaterial.new()
+	vignette.shader = Shader.new()
+	vignette.shader.code = """shader_type canvas_item;
+uniform float strength = 0.0;
+void fragment() {
+	float d = distance(UV, vec2(0.5));
+	COLOR = vec4(0.8, 0.0, 0.0, smoothstep(0.25, 0.75, d) * strength);
+}"""
+	_hurt_overlay.material = vignette
+	root.add_child(_hurt_overlay)
 
 	_money = _label(root, 28, Color(0.55, 1.0, 0.6))
 	_money.position = Vector2(20, 14)
@@ -30,6 +49,23 @@ func _ready() -> void:
 	_depth.position = Vector2(20, 82)
 	_tool = _label(root, 16, Color(1, 1, 1, 0.85))
 	_tool.position = Vector2(20, 108)
+
+	_health_bar = ProgressBar.new()
+	_health_bar.show_percentage = false
+	_health_bar.position = Vector2(20, 140)
+	_health_bar.size = Vector2(240, 18)
+	var bg := StyleBoxFlat.new()
+	bg.bg_color = Color(0, 0, 0, 0.5)
+	bg.set_corner_radius_all(4)
+	var fill := StyleBoxFlat.new()
+	fill.bg_color = Color(0.85, 0.2, 0.25)
+	fill.set_corner_radius_all(4)
+	_health_bar.add_theme_stylebox_override("background", bg)
+	_health_bar.add_theme_stylebox_override("fill", fill)
+	root.add_child(_health_bar)
+	_health_label = _label(root, 14)
+	_health_label.position = Vector2(26, 139)
+	Game.player_hurt.connect(func(amount: float) -> void: _hurt = clampf(_hurt + amount / 25.0, 0.4, 1.0))
 
 	_prompt = _label(root, 22, Color(1.0, 0.85, 0.4))
 	_prompt.set_anchors_and_offsets_preset(Control.PRESET_CENTER)
@@ -64,7 +100,7 @@ func _ready() -> void:
 	_toast.position += Vector2(-350, 20)
 
 	var help := _label(root, 14, Color(1, 1, 1, 0.7))
-	help.text = "WASD move   Space jump   Shift sprint   Hold left click mine   E shop   R back to base   Esc free mouse"
+	help.text = "WASD move   Space jump   Shift sprint   Left click mine   Right click shoot   E shop   R back to base   Esc free mouse"
 	help.set_anchors_and_offsets_preset(Control.PRESET_BOTTOM_LEFT)
 	help.position += Vector2(20, -34)
 
@@ -80,7 +116,12 @@ func _process(delta: float) -> void:
 		bag_text += "   FULL"
 	_bag.text = bag_text
 
-	_tool.text = "%s   Dig size %.1f" % [Game.tool()["name"], Game.dig_radius()]
+	_tool.text = "%s   Dig size %.1f   %s" % [Game.tool()["name"], Game.dig_radius(), Game.weapon()["name"]]
+	_health_bar.max_value = Game.max_health()
+	_health_bar.value = Game.health
+	_health_label.text = "Health %d / %d" % [ceili(Game.health), Game.max_health()]
+	_hurt = maxf(_hurt - delta * 1.5, 0.0)
+	(_hurt_overlay.material as ShaderMaterial).set_shader_parameter("strength", _hurt)
 	_prompt.text = "Press E to shop" if shop and shop.is_player_near() and not shop.is_open() else ""
 
 	if player:

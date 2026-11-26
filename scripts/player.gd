@@ -12,6 +12,12 @@ const EYE_HEIGHT := 0.65 # above the body's center
 
 ## When in a swing the tool connects (0-1 through one swing).
 const IMPACT_PHASE := 0.62
+## Landing faster than this (m/s) hurts.
+const FALL_DAMAGE_SPEED := 14.0
+## Health per second you get back after not being hurt for a while, and at base.
+const REGEN_DELAY := 6.0
+const REGEN_RATE := 4.0
+const BASE_HEAL_RATE := 30.0
 
 var world: VoxelWorld
 var spawn_position := Vector3.ZERO
@@ -33,6 +39,13 @@ var _shake := 0.0
 var _progress_anchor := Vector3.INF
 var _progress_id := -1
 var _toast_cooldown := 0.0
+var lamp: SpotLight3D
+var _gun: Node3D
+var _gun_cooldown := 0.0
+var _recoil := 0.0
+var _muzzle_light: OmniLight3D
+var _since_hurt := 99.0
+var _fall_speed := 0.0
 
 
 func _ready() -> void:
@@ -51,7 +64,7 @@ func _ready() -> void:
 	add_child(camera)
 
 	# Headlamp so tunnels are not pitch black.
-	var lamp := SpotLight3D.new()
+	lamp = SpotLight3D.new()
 	lamp.spot_range = 18.0
 	lamp.spot_angle = 40.0
 	lamp.spot_attenuation = 0.6
@@ -65,7 +78,15 @@ func _ready() -> void:
 	add_child(_dig_preview)
 
 	_build_tool()
-	Game.upgraded.connect(func(_kind: String) -> void: _build_tool())
+	_build_gun()
+	Game.upgraded.connect(func(_kind: String) -> void:
+		_build_tool()
+		_build_gun())
+	Game.player_hurt.connect(func(_amount: float) -> void:
+		_since_hurt = 0.0
+		_shake = maxf(_shake, 0.15))
+	Game.player_died.connect(_on_died)
+	Game.health = Game.max_health()
 
 	floor_snap_length = 0.4
 	floor_max_angle = deg_to_rad(55)
@@ -113,7 +134,13 @@ func _physics_process(delta: float) -> void:
 	else:
 		velocity.x = move_toward(velocity.x, 0, speed * 10.0 * delta)
 		velocity.z = move_toward(velocity.z, 0, speed * 10.0 * delta)
+	var was_on_floor := is_on_floor()
+	var falling := -velocity.y
 	move_and_slide()
+	# Fall damage for hard landings.
+	if not was_on_floor and is_on_floor() and falling > FALL_DAMAGE_SPEED:
+		Game.damage_player((falling - FALL_DAMAGE_SPEED) * 6.0)
+		Game.show_toast("Ouch! Hard landing")
 
 	if global_position.y < -10.0:
 		respawn()
@@ -122,9 +149,86 @@ func _physics_process(delta: float) -> void:
 func _process(delta: float) -> void:
 	_toast_cooldown = maxf(_toast_cooldown - delta, 0.0)
 	_update_target()
-	var wants_to_mine := Input.is_action_pressed("mine") and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED and not Game.ui_open
+	var active := Input.mouse_mode == Input.MOUSE_MODE_CAPTURED and not Game.ui_open
+	var wants_to_mine := Input.is_action_pressed("mine") and active
 	_animate(delta, wants_to_mine)
 
+	_gun_cooldown = maxf(_gun_cooldown - delta, 0.0)
+	if Input.is_action_pressed("attack") and active and _gun_cooldown <= 0.0:
+		shoot()
+	_recoil = maxf(_recoil - delta * 6.0, 0.0)
+	_gun.position = Vector3(-0.3, -0.3, -0.55 + _recoil * 0.08)
+	_gun.rotation.x = _recoil * 0.25
+	_muzzle_light.light_energy = _recoil * 3.0
+
+	# Healing: slowly after a while, quickly at the base.
+	_since_hurt += delta
+	if _at_base():
+		Game.heal_player(BASE_HEAL_RATE * delta)
+	elif _since_hurt > REGEN_DELAY:
+		Game.heal_player(REGEN_RATE * delta)
+
+
+## Fires the weapon once. Returns the monster hit, if any. Public so tests can drive it.
+func shoot() -> Monster:
+	var w := Game.weapon()
+	_gun_cooldown = 1.0 / w["shots_per_second"]
+	_recoil = 1.0
+	var from := camera.global_position
+	var dir := -camera.global_basis.z
+	var query := PhysicsRayQueryParameters3D.create(from, from + dir * w["range"])
+	query.collide_with_areas = true
+	query.collision_mask = 1 | Monster.HITBOX_LAYER
+	query.exclude = [get_rid()]
+	var result := get_world_3d().direct_space_state.intersect_ray(query)
+	var end: Vector3 = from + dir * w["range"]
+	var hit_monster: Monster = null
+	if not result.is_empty():
+		end = result["position"]
+		if result["collider"] is Monster:
+			hit_monster = result["collider"]
+			hit_monster.take_damage(w["damage"], global_position)
+		else:
+			_spawn_debris(end, Color(1, 0.9, 0.6), 4, 1.5)
+	_spawn_tracer(_muzzle_light.global_position, end, w["color"])
+	return hit_monster
+
+
+func _at_base() -> bool:
+	var flat := Vector2(global_position.x - world.base_position.x, global_position.z - world.base_position.z)
+	return flat.length() < WorldConfig.BASE_RADIUS and absf(global_position.y - world.base_position.y) < 3.0
+
+
+func _on_died() -> void:
+	Game.backpack.clear()
+	Game.backpack_changed.emit()
+	respawn()
+	Game.health = Game.max_health()
+	Game.health_changed.emit(Game.health, Game.max_health())
+	Game.show_toast("You were knocked out! Your backpack was lost.")
+
+
+func _spawn_tracer(from: Vector3, to: Vector3, color: Color) -> void:
+	var mi := MeshInstance3D.new()
+	var mesh := ImmediateMesh.new()
+	var mat := StandardMaterial3D.new()
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.albedo_color = color
+	mat.emission_enabled = true
+	mat.emission = color
+	mat.emission_energy_multiplier = 3.0
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mesh.surface_begin(Mesh.PRIMITIVE_LINES, mat)
+	mesh.surface_add_vertex(from)
+	mesh.surface_add_vertex(to)
+	mesh.surface_end()
+	mi.mesh = mesh
+	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	mi.top_level = true
+	get_parent().add_child(mi)
+	var tween := mi.create_tween()
+	tween.tween_property(mat, "albedo_color:a", 0.0, 0.12)
+	tween.tween_callback(mi.queue_free)
 
 ## One strike of the tool against the current target. Public so tests can drive it.
 func hit() -> void:
@@ -312,6 +416,36 @@ func _box(parent: Node3D, size: Vector3, pos: Vector3, mat: Material) -> MeshIns
 	mi.position = pos
 	parent.add_child(mi)
 	return mi
+
+
+func _build_gun() -> void:
+	if _gun:
+		_gun.queue_free()
+	var w := Game.weapon()
+	_gun = Node3D.new()
+	var body := _mat(w["color"] * 0.7, 0.2, 0.5)
+	var dark := _mat(Color(0.12, 0.12, 0.14), 0.3, 0.5)
+	var glow := StandardMaterial3D.new()
+	glow.albedo_color = w["color"]
+	glow.emission_enabled = true
+	glow.emission = w["color"]
+	glow.emission_energy_multiplier = 1.0
+	_box(_gun, Vector3(0.09, 0.1, 0.32), Vector3(0, 0, 0), body)
+	_box(_gun, Vector3(0.05, 0.05, 0.22), Vector3(0, 0.02, -0.25), dark)
+	_box(_gun, Vector3(0.06, 0.13, 0.07), Vector3(0, -0.1, 0.08), dark)
+	_box(_gun, Vector3(0.095, 0.02, 0.2), Vector3(0, 0.06, -0.02), glow)
+	_muzzle_light = OmniLight3D.new()
+	_muzzle_light.light_color = w["color"]
+	_muzzle_light.omni_range = 4.0
+	_muzzle_light.light_energy = 0.0
+	_muzzle_light.position = Vector3(0, 0.02, -0.4)
+	_gun.add_child(_muzzle_light)
+	_gun.scale = Vector3.ONE * 0.75
+	camera.add_child(_gun)
+	for child in _gun.find_children("*", "MeshInstance3D", true, false):
+		var mi := child as MeshInstance3D
+		mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		mi.layers = 2
 
 
 func _make_pickaxe(head_color: Color) -> Node3D:

@@ -5,6 +5,9 @@ var world: VoxelWorld
 var player: Player
 var hud: Hud
 var shop: Shop
+var spawner: MonsterSpawner
+var env: Environment
+var sun: DirectionalLight3D
 
 
 func _ready() -> void:
@@ -39,6 +42,12 @@ func _ready() -> void:
 	shop.player = player
 	add_child(shop)
 
+	spawner = MonsterSpawner.new()
+	spawner.name = "Monsters"
+	spawner.player = player
+	spawner.world = world
+	add_child(spawner)
+
 	hud = Hud.new()
 	hud.player = player
 	hud.shop = shop
@@ -58,7 +67,7 @@ func _setup_environment() -> void:
 	sky_mat.sun_angle_max = 20.0
 	var sky := Sky.new()
 	sky.sky_material = sky_mat
-	var env := Environment.new()
+	env = Environment.new()
 	env.background_mode = Environment.BG_SKY
 	env.sky = sky
 	env.ambient_light_source = Environment.AMBIENT_SOURCE_SKY
@@ -92,7 +101,7 @@ func _setup_environment() -> void:
 	we.environment = env
 	add_child(we)
 
-	var sun := DirectionalLight3D.new()
+	sun = DirectionalLight3D.new()
 	sun.rotation_degrees = Vector3(-42, -30, 0)
 	sun.light_color = Color(1.0, 0.95, 0.86)
 	sun.light_energy = 1.25
@@ -120,3 +129,17 @@ func _make_loading_screen() -> CanvasLayer:
 	layer.add_child(label)
 	add_child(layer)
 	return layer
+
+
+## Underground gets darker and hazier the deeper you go, and the headlamp brightens.
+func _process(_delta: float) -> void:
+	if player == null:
+		return
+	var depth := WorldConfig.SURFACE_Y - player.camera.global_position.y
+	var u := clampf((depth - 3.0) / 12.0, 0.0, 1.0)
+	env.ambient_light_energy = lerpf(0.55, 0.05, u)
+	env.fog_light_color = Color(0.66, 0.76, 0.9).lerp(Color(0.03, 0.03, 0.045), u)
+	env.fog_density = lerpf(0.006, 0.035, u)
+	env.fog_aerial_perspective = lerpf(0.5, 0.0, u)
+	player.lamp.light_energy = lerpf(0.45, 1.2, u)
+	player.lamp.spot_range = lerpf(18.0, 24.0, u)

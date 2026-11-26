@@ -115,6 +115,12 @@ func get_material(p: Vector3i) -> int:
 	return material[_index(p.x, p.y, p.z)]
 
 
+## True if the point (meters) is open air, e.g. inside a cave.
+func is_air(world_pos: Vector3) -> bool:
+	var g := world_pos / voxel_size
+	return get_density(Vector3i(roundi(g.x), roundi(g.y), roundi(g.z))) < ISO
+
+
 ## Ground height in meters of the generated terrain at (x, z) meters.
 func surface_height(x: float, z: float) -> float:
 	var gx := clampi(roundi(x / voxel_size), 0, size.x - 1)
@@ -221,7 +227,7 @@ func _generate_terrain(seed_value: int) -> void:
 	_gen_results.clear()
 	_gen_results.resize(sz)
 	var ore_table := _build_ore_table()
-	var task := WorkerThreadPool.add_group_task(_generate_slice.bind(noises["veins"], noises["layers"], ore_table), sz, -1, true, "terrain")
+	var task := WorkerThreadPool.add_group_task(_generate_slice.bind(noises["veins"], noises["layers"], noises["tunnel_a"], noises["tunnel_b"], noises["caverns"], ore_table), sz, -1, true, "terrain")
 	WorkerThreadPool.wait_for_group_task_completion(task)
 	density = PackedByteArray()
 	material = PackedByteArray()
@@ -249,11 +255,25 @@ func _make_noises(seed_value: int) -> Dictionary:
 	var layers := FastNoiseLite.new()
 	layers.seed = seed_value + 55
 	layers.frequency = 0.05
-	return {"hills": hills, "bumps": bumps, "veins": veins, "layers": layers}
+	var tunnel_a := FastNoiseLite.new()
+	tunnel_a.seed = seed_value + 201
+	tunnel_a.frequency = WorldConfig.TUNNEL_FREQUENCY
+	tunnel_a.fractal_type = FastNoiseLite.FRACTAL_NONE
+	var tunnel_b := FastNoiseLite.new()
+	tunnel_b.seed = seed_value + 202
+	tunnel_b.frequency = WorldConfig.TUNNEL_FREQUENCY
+	tunnel_b.fractal_type = FastNoiseLite.FRACTAL_NONE
+	var caverns := FastNoiseLite.new()
+	caverns.seed = seed_value + 203
+	caverns.frequency = WorldConfig.CAVERN_FREQUENCY
+	caverns.fractal_octaves = 2
+	return {"hills": hills, "bumps": bumps, "veins": veins, "layers": layers,
+		"tunnel_a": tunnel_a, "tunnel_b": tunnel_b, "caverns": caverns}
 
 
 ## Fills one z slice of the grid. Runs on a worker thread.
-func _generate_slice(z: int, veins: FastNoiseLite, layers: FastNoiseLite, ore_table: PackedFloat32Array) -> void:
+func _generate_slice(z: int, veins: FastNoiseLite, layers: FastNoiseLite, tunnel_a: FastNoiseLite,
+		tunnel_b: FastNoiseLite, caverns: FastNoiseLite, ore_table: PackedFloat32Array) -> void:
 	var sx := size.x
 	var sy := size.y
 	var dens := PackedByteArray()
@@ -265,6 +285,7 @@ func _generate_slice(z: int, veins: FastNoiseLite, layers: FastNoiseLite, ore_ta
 	var surface_g := WorldConfig.SURFACE_Y / vs
 	var ore_stride := 1 + WorldConfig.ORES.size() * 2
 	var ore_rows := ore_table.size() / ore_stride
+	var cave_start := WorldConfig.CAVE_START_DEPTH
 	for x in sx:
 		var h := _heights[x + z * sx]
 		# Steep hillsides: scale by the slope so the density is a true distance to
@@ -290,13 +311,33 @@ func _generate_slice(z: int, veins: FastNoiseLite, layers: FastNoiseLite, ore_ta
 			elif below < WorldConfig.DIRT_DEPTH + wobble * 0.5:
 				id = Blocks.DIRT
 			else:
-				id = Blocks.STONE if depth < WorldConfig.BASALT_DEPTH else Blocks.BASALT
+				if depth < WorldConfig.BASALT_DEPTH:
+					id = Blocks.STONE
+				elif depth < WorldConfig.MAGMA_DEPTH:
+					id = Blocks.BASALT
+				else:
+					id = Blocks.MAGMA_ROCK
 				var di := clampi(int(depth), 0, ore_rows - 1)
 				if ore_table[di * ore_stride] > 0.0:
 					var t := clampf(depth / WorldConfig.SURFACE_Y, 0.0, 1.0)
 					var threshold := lerpf(WorldConfig.ORE_THRESHOLD_TOP, WorldConfig.ORE_THRESHOLD_BOTTOM, t)
 					if veins.get_noise_3d(x * vs, y * vs, z * vs) > threshold:
 						id = _pick_ore(ore_table, di * ore_stride, x * vs, y * vs, z * vs)
+			# Caves: carve tunnels and caverns out of the rock.
+			if below > cave_start * 0.6 and y >= core_top:
+				var mx := x * vs
+				var my := y * vs
+				var mz := z * vs
+				# Squash the tunnel noise vertically so tunnels run more sideways.
+				var tunnel := maxf(absf(tunnel_a.get_noise_3d(mx, my * 1.5, mz)), absf(tunnel_b.get_noise_3d(mx, my * 1.5, mz)))
+				var sdf := (tunnel - WorldConfig.TUNNEL_WIDTH) * 18.0
+				var t := clampf(depth / WorldConfig.SURFACE_Y, 0.0, 1.0)
+				var cavern_threshold := lerpf(WorldConfig.CAVERN_THRESHOLD_TOP, WorldConfig.CAVERN_THRESHOLD_BOTTOM, t)
+				sdf = minf(sdf, (cavern_threshold - caverns.get_noise_3d(mx, my * 1.3, mz)) * 25.0)
+				# Keep a solid roof under the surface and a floor above the core.
+				sdf += maxf(cave_start - below, 0.0) * 1.5
+				sdf += maxf(4.0 - (my - WorldConfig.CORE_DEPTH), 0.0) * 1.5
+				d = mini(d, clampi(int(ISO + sdf / vs * DENSITY_SLOPE), 0, 255))
 			var i := x + y * sx
 			dens[i] = d
 			mats[i] = id

@@ -21,6 +21,8 @@ func _run() -> void:
 	var player = main.player
 	var shop = main.shop
 	var game: Node = root.get_node("Game")
+	var spawner = main.spawner
+	spawner.enabled = false
 	_check(world.world_size().is_equal_approx(WorldConfig.WORLD_SIZE), "world has the configured size")
 	_check(player.is_on_floor(), "player is standing on the ground (at %s)" % player.global_position)
 	print("  info generating took %d ms, meshing %d ms, grid %s" % [world.last_generate_ms, world.last_build_ms, world.size])
@@ -107,6 +109,79 @@ func _run() -> void:
 	for i in 40:
 		player.hit()
 	_check(absf(_surface_at(world, fx, z) - ftop) < 0.01, "a full backpack stops digging")
+
+	# Caves: there should be open air well below the surface.
+	var cave_air := 0
+	var vs: float = world.voxel_size
+	for gz in range(4, world.size.z - 4, 4):
+		for gx in range(4, world.size.x - 4, 4):
+			var ground: float = world.surface_height(gx * vs, gz * vs)
+			for gy in range(int((ground - 12.0) / vs), int(4.0 / vs), -4):
+				if world.get_density(Vector3i(gx, gy, gz)) < VoxelWorld.ISO:
+					cave_air += 1
+	_check(cave_air > 200, "caves: found %d open air samples deep underground" % cave_air)
+
+	# Monsters: none at the surface, some when deep.
+	game.backpack.clear()
+	player.respawn()
+	await _frames(2)
+	_check(spawner.spawn_near_player() == null, "no monsters spawn at the surface")
+	player.global_position = Vector3(world.base_position.x + 10, WorldConfig.SURFACE_Y - 30.0, world.base_position.z + 10)
+	var mon = spawner.spawn_near_player()
+	_check(mon != null, "a monster spawns when you are 30m down (%s)" % (mon.kind["name"] if mon else "none"))
+	if mon:
+		var mdepth: float = WorldConfig.SURFACE_Y - mon.global_position.y
+		_check(mdepth >= Monsters.MIN_DEPTH, "it spawned deep enough (%.0fm)" % mdepth)
+		# Shoot it point blank until it dies.
+		mon.global_position = player.camera.global_position - player.camera.global_basis.z * 3.0
+		var money_before: int = game.money
+		var reward: int = mon.kind["reward"]
+		var shots := 0
+		for i in 200:
+			await _frames(1)
+			if not is_instance_valid(mon) or mon._dying:
+				break
+			mon.global_position = player.camera.global_position - player.camera.global_basis.z * 3.0
+			await physics_frame
+			player.shoot()
+			shots += 1
+		_check(not is_instance_valid(mon) or mon._dying, "shooting kills it (%d shots)" % shots)
+		_check(game.money == money_before + reward, "killing it pays $%d" % reward)
+
+	# A monster that reaches you bites.
+	game.health = game.max_health()
+	var biter = spawner.spawn_near_player()
+	if biter:
+		biter.global_position = player.global_position + Vector3(0.5, 0.3, 0)
+		var hp: float = game.health
+		await _frames(10)
+		_check(game.health < hp, "a monster bite hurts (%.0f -> %.0f)" % [hp, game.health])
+		biter.queue_free()
+
+	# Dying sends you home and empties the backpack.
+	game.backpack = {Blocks.GOLD: 5.0}
+	game.damage_player(10000.0)
+	await _frames(2)
+	_check(game.backpack_count() == 0, "dying empties the backpack")
+	_check(player.global_position.distance_to(player.spawn_position) < 1.0, "dying sends you back to base")
+	_check(is_equal_approx(game.health, game.max_health()), "you come back with full health")
+
+	# Armor raises max health.
+	var hp_before: float = game.max_health()
+	game.money = 100000
+	_check(game.buy("armor") and game.max_health() > hp_before, "armor raises max health to %d" % game.max_health())
+	_check(game.buy("weapon") and game.weapon()["name"] == Upgrades.WEAPONS[1]["name"], "bought the %s" % Upgrades.WEAPONS[1]["name"])
+
+	# Fall damage.
+	game.health = game.max_health()
+	player.global_position = world.base_position + Vector3(0, 14.0, 3.0)
+	player.velocity = Vector3.ZERO
+	for i in 180:
+		await physics_frame
+		if player.is_on_floor():
+			break
+	await _frames(2)
+	_check(game.health < game.max_health(), "falling 14m hurts (%.0f / %d)" % [game.health, game.max_health()])
 
 	print("\n%s (%d failures)" % ["PASS" if _failures == 0 else "FAIL", _failures])
 	quit(1 if _failures > 0 else 0)
